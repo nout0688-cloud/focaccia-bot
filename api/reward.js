@@ -27,6 +27,14 @@ module.exports = async function handler(req, res) {
   if (!userId) return res.status(400).json({ ok: false, error: 'userId required' });
 
   try {
+    // Check if account reset was ordered by admin
+    const resetFlag = await redis('GET', `reset:${userId}`);
+    if (resetFlag?.result) {
+      await redis('DEL', `reset:${userId}`);
+      await redis('DEL', `reward:${userId}`);
+      return res.status(200).json({ ok: true, reset: true });
+    }
+
     const data = await redis('GET', `reward:${userId}`);
     const amount = data?.result ? parseInt(data.result) : 0;
 

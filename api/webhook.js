@@ -109,7 +109,9 @@ module.exports = async function handler(req, res) {
           `/broadcast <текст> — розсилка всім\n` +
           `/give <кількість> — видати собі фокачі\n` +
           `/giveto <username> <кількість> — видати комусь\n` +
-          `/check <username> — інфо про юзера`,
+          `/check <username> — інфо про юзера\n` +
+          `/reset <username> — скинути акаунт юзера\n` +
+          `/reset_all — скинути акаунти ВСІХ гравців`,
         parse_mode: 'Markdown',
       });
       return res.status(200).json({ ok: true });
@@ -273,6 +275,106 @@ module.exports = async function handler(req, res) {
       }
 
       await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: info, parse_mode: 'Markdown' });
+      return res.status(200).json({ ok: true });
+    }
+
+    // /reset <username> — request single user reset
+    if (text.startsWith('/reset ') && !text.startsWith('/reset_all')) {
+      const targetUsername = text.split(' ')[1].replace('@', '').toLowerCase();
+      const targetData = await redis('HGET', 'usernames', targetUsername);
+      if (!targetData?.result) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: `❌ @${targetUsername} не знайдений` });
+        return res.status(200).json({ ok: true });
+      }
+
+      const targetChatId = targetData.result;
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text:
+          `⚠️ *ПІДТВЕРДЖЕННЯ СКИДАННЯ АКАУНТУ*\n\n` +
+          `Ви дійсно хочете скинути весь прогрес для @${targetUsername} (ID: \`${targetChatId}\`)?\n\n` +
+          `👉 Для підтвердження відправте:\n`/confirm_reset @${targetUsername}``,
+        parse_mode: 'Markdown',
+      });
+      return res.status(200).json({ ok: true });
+    }
+
+    // /confirm_reset <username> — execute single user reset
+    if (text.startsWith('/confirm_reset ')) {
+      const targetUsername = text.split(' ')[1].replace('@', '').toLowerCase();
+      const targetData = await redis('HGET', 'usernames', targetUsername);
+      if (!targetData?.result) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: `❌ @${targetUsername} не знайдений` });
+        return res.status(200).json({ ok: true });
+      }
+
+      const targetChatId = targetData.result;
+      // Mark user for client reset and clear pending rewards
+      await redis('SET', `reset:${targetChatId}`, '1');
+      await redis('DEL', `reward:${targetChatId}`);
+
+      // Notify target user
+      try {
+        await sendTg(TOKEN, 'sendMessage', {
+          chat_id: Number(targetChatId),
+          text: `⚠️ *Твій ігровий прогрес було скинуто адміністратором.*\nПри наступному відкритті гра розпочнеться з нуля.`,
+          parse_mode: 'Markdown',
+        });
+      } catch { /* user may have blocked bot */ }
+
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: `✅ Акаунт @${targetUsername} позначено на скидання! При наступному запуску гри весь його прогрес очиститься.`,
+      });
+      return res.status(200).json({ ok: true });
+    }
+
+    // /reset_all — request all users reset
+    if (text === '/reset_all') {
+      const usersData = await redis('HGETALL', 'users');
+      const userCount = usersData?.result ? Math.floor(usersData.result.length / 2) : 0;
+
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text:
+          `🚨 *УВАГА: СКИДАННЯ ВСІХ АКАУНТІВ!*\n\n` +
+          `Це скине прогрес у ВСІХ зареєстрованих гравців (всього: ${userCount})!\n\n` +
+          `👉 Для підтвердження відправте ТОЧНО таку команду:\n`/confirm_reset_all YES``,
+        parse_mode: 'Markdown',
+      });
+      return res.status(200).json({ ok: true });
+    }
+
+    // /confirm_reset_all YES — execute all users reset
+    if (text === '/confirm_reset_all YES') {
+      const usersData = await redis('HGETALL', 'users');
+      if (!usersData?.result || usersData.result.length === 0) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Немає юзерів у базі' });
+        return res.status(200).json({ ok: true });
+      }
+
+      const entries = usersData.result;
+      let count = 0;
+      for (let i = 0; i < entries.length; i += 2) {
+        const uid = entries[i];
+        await redis('SET', `reset:${uid}`, '1');
+        await redis('DEL', `reward:${uid}`);
+        count++;
+
+        // Notify user
+        try {
+          await sendTg(TOKEN, 'sendMessage', {
+            chat_id: Number(uid),
+            text: `⚠️ *Глобальне скидання:*\nТвій ігровий прогрес було скинуто адміністратором. Гра розпочнеться з нуля!`,
+            parse_mode: 'Markdown',
+          });
+        } catch { /* ignore */ }
+      }
+
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: `✅ Успішно активовано скидання для ВСІХ гравців (${count} акаунтів)!`,
+      });
       return res.status(200).json({ ok: true });
     }
 
