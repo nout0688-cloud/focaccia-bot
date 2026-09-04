@@ -4,7 +4,7 @@
  */
 
 const WEBAPP_URL = 'https://nout0688-cloud.github.io/focaccia-clicker/?v=1.1.3';
-const ADMIN_ID = 1975429762;
+const ADMIN_ID = process.env.ADMIN_ID ? parseInt(process.env.ADMIN_ID, 10) : 1975429762;
 
 async function redis(...args) {
   const url = process.env.KV_REST_API_URL;
@@ -48,7 +48,7 @@ async function sendTg(token, method, body) {
 }
 
 function isAdmin(userId) {
-  return userId === ADMIN_ID;
+  return ADMIN_ID !== null && userId === ADMIN_ID;
 }
 
 module.exports = async function handler(req, res) {

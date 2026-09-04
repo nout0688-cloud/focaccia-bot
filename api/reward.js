@@ -25,7 +25,11 @@ module.exports = async function handler(req, res) {
 
   const userId = req.query.userId;
   const userLastReset = parseInt(req.query.lastReset || '0');
-  if (!userId) return res.status(400).json({ ok: false, error: 'userId required' });
+
+  // Validate: userId must be a positive integer (Telegram user IDs are numeric)
+  if (!userId || !/^\d+$/.test(userId) || parseInt(userId, 10) <= 0) {
+    return res.status(400).json({ ok: false, error: 'invalid userId' });
+  }
 
   try {
     // Check global reset time
