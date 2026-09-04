@@ -1,9 +1,34 @@
 /**
  * Фокача Клікер — Telegram Bot (Vercel Serverless)
- * Webhook handler: Telegram надсилає сюди кожне повідомлення.
+ * Webhook handler + зберігає юзерів для нагадувань.
  */
 
 const WEBAPP_URL = 'https://nout0688-cloud.github.io/focaccia-clicker/';
+
+async function redis(...args) {
+  const url = process.env.KV_REST_API_URL;
+  const token = process.env.KV_REST_API_TOKEN;
+  if (!url || !token) return null;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(args),
+  });
+  return res.json();
+}
+
+async function sendMessage(token, chatId, text, keyboard) {
+  const body = { chat_id: chatId, text };
+  if (keyboard) body.reply_markup = keyboard;
+  await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
 
 module.exports = async function handler(req, res) {
   if (req.method !== 'POST') {
@@ -23,6 +48,14 @@ module.exports = async function handler(req, res) {
       const chatId = msg.chat.id;
       const name = msg.from?.first_name || 'друже';
 
+      // Зберігаємо юзера для нагадувань
+      await redis(
+        'HSET',
+        'users',
+        String(chatId),
+        JSON.stringify({ name, lastActive: Date.now(), reminded: false }),
+      );
+
       const text =
         `Привіт, ${name}! 👋\n\n` +
         `🫓 Фокача Клікер — клікай, їж, прокачуйся!\n\n` +
@@ -36,24 +69,23 @@ module.exports = async function handler(req, res) {
         `• 16 досягнень 🏆\n\n` +
         `Натисни кнопку нижче і почни клікати! 👇`;
 
-      await fetch(`https://api.telegram.org/bot${TOKEN}/sendMessage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: chatId,
-          text: text,
-          reply_markup: {
-            inline_keyboard: [
-              [
-                {
-                  text: '🫓 Грати у Фокача Клікер!',
-                  web_app: { url: WEBAPP_URL },
-                },
-              ],
-            ],
-          },
-        }),
+      await sendMessage(TOKEN, chatId, text, {
+        inline_keyboard: [
+          [{ text: '🫓 Грати у Фокача Клікер!', web_app: { url: WEBAPP_URL } }],
+        ],
       });
+    }
+
+    // Будь-яке повідомлення — оновлюємо lastActive
+    if (msg?.from?.id) {
+      const chatId = msg.chat.id;
+      const name = msg.from.first_name || 'друже';
+      await redis(
+        'HSET',
+        'users',
+        String(chatId),
+        JSON.stringify({ name, lastActive: Date.now(), reminded: false }),
+      );
     }
 
     res.status(200).json({ ok: true });
