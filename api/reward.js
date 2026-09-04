@@ -24,15 +24,25 @@ module.exports = async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(200).end();
 
   const userId = req.query.userId;
+  const userLastReset = parseInt(req.query.lastReset || '0');
   if (!userId) return res.status(400).json({ ok: false, error: 'userId required' });
 
   try {
-    // Check if account reset was ordered by admin
+    // Check global reset time
+    const globalResetData = await redis('GET', 'global_reset_time');
+    const globalResetTime = globalResetData?.result ? parseInt(globalResetData.result) : 0;
+
+    // Check individual reset flag
     const resetFlag = await redis('GET', `reset:${userId}`);
-    if (resetFlag?.result) {
-      await redis('DEL', `reset:${userId}`);
+
+    if (resetFlag?.result || (globalResetTime > 0 && userLastReset < globalResetTime)) {
+      if (resetFlag?.result) await redis('DEL', `reset:${userId}`);
       await redis('DEL', `reward:${userId}`);
-      return res.status(200).json({ ok: true, reset: true });
+      return res.status(200).json({
+        ok: true,
+        reset: true,
+        resetTime: Math.max(globalResetTime, Date.now()),
+      });
     }
 
     const data = await redis('GET', `reward:${userId}`);

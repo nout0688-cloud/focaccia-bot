@@ -3,7 +3,7 @@
  * Webhook + Admin panel для user ID 1975429762
  */
 
-const WEBAPP_URL = 'https://nout0688-cloud.github.io/focaccia-clicker/';
+const WEBAPP_URL = 'https://nout0688-cloud.github.io/focaccia-clicker/?v=1.1.3';
 const ADMIN_ID = 1975429762;
 
 async function redis(...args) {
@@ -347,9 +347,12 @@ module.exports = async function handler(req, res) {
 
     // /confirm_reset_all YES — execute all users reset
     if (text === '/confirm_reset_all YES') {
+      const resetTime = Date.now();
+      await redis('SET', 'global_reset_time', String(resetTime));
+
       const usersData = await redis('HGETALL', 'users');
       if (!usersData?.result || usersData.result.length === 0) {
-        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Немає юзерів у базі' });
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '✅ Глобальне скидання встановлено! Юзерів у базі поки нема.' });
         return res.status(200).json({ ok: true });
       }
 
@@ -367,6 +370,9 @@ module.exports = async function handler(req, res) {
             chat_id: Number(uid),
             text: `⚠️ *Глобальне скидання:*\nТвій ігровий прогрес було скинуто адміністратором. Гра розпочнеться з нуля!`,
             parse_mode: 'Markdown',
+            reply_markup: {
+              inline_keyboard: [[{ text: '🫓 Почати з нуля!', web_app: { url: WEBAPP_URL } }]],
+            },
           });
         } catch { /* ignore */ }
       }
