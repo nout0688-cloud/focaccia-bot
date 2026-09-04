@@ -1,9 +1,10 @@
 /**
  * Фокача Клікер — Telegram Bot (Vercel Serverless)
- * Webhook handler + зберігає юзерів для нагадувань.
+ * Webhook + Admin panel для user ID 1975429762
  */
 
 const WEBAPP_URL = 'https://nout0688-cloud.github.io/focaccia-clicker/';
+const ADMIN_ID = 1975429762;
 
 async function redis(...args) {
   const url = process.env.KV_REST_API_URL;
@@ -11,23 +12,23 @@ async function redis(...args) {
   if (!url || !token) return null;
   const res = await fetch(url, {
     method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
-    },
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(args),
   });
   return res.json();
 }
 
-async function sendMessage(token, chatId, text, keyboard) {
-  const body = { chat_id: chatId, text };
-  if (keyboard) body.reply_markup = keyboard;
-  await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+async function sendTg(token, method, body) {
+  const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
+  return res.json();
+}
+
+function isAdmin(userId) {
+  return userId === ADMIN_ID;
 }
 
 module.exports = async function handler(req, res) {
@@ -36,27 +37,36 @@ module.exports = async function handler(req, res) {
   }
 
   const TOKEN = process.env.BOT_TOKEN;
-  if (!TOKEN) {
-    return res.status(500).json({ error: 'BOT_TOKEN not set' });
-  }
+  if (!TOKEN) return res.status(500).json({ error: 'BOT_TOKEN not set' });
 
   try {
     const update = req.body;
     const msg = update?.message;
+    if (!msg?.text) return res.status(200).json({ ok: true });
 
-    if (msg?.text === '/start') {
-      const chatId = msg.chat.id;
-      const name = msg.from?.first_name || 'друже';
+    const chatId = msg.chat.id;
+    const userId = msg.from?.id;
+    const name = msg.from?.first_name || 'друже';
+    const username = msg.from?.username;
+    const text = msg.text.trim();
 
-      // Зберігаємо юзера для нагадувань
-      await redis(
-        'HSET',
-        'users',
-        String(chatId),
-        JSON.stringify({ name, lastActive: Date.now(), reminded: false }),
-      );
+    // Save user info for reminders + admin
+    const userData = JSON.stringify({
+      name,
+      username: username || '',
+      lastActive: Date.now(),
+      reminded: false,
+    });
+    await redis('HSET', 'users', String(chatId), userData);
 
-      const text =
+    // Save username → chatId mapping
+    if (username) {
+      await redis('HSET', 'usernames', username.toLowerCase(), String(chatId));
+    }
+
+    // ===== /start =====
+    if (text === '/start') {
+      const welcome =
         `Привіт, ${name}! 👋\n\n` +
         `🫓 Фокача Клікер — клікай, їж, прокачуйся!\n\n` +
         `🏗️ Будуй пекарні, наймай бабусь, відкривай філії в Італії та навіть запускай космічні пекарні! 🚀\n\n` +
@@ -69,23 +79,201 @@ module.exports = async function handler(req, res) {
         `• 16 досягнень 🏆\n\n` +
         `Натисни кнопку нижче і почни клікати! 👇`;
 
-      await sendMessage(TOKEN, chatId, text, {
-        inline_keyboard: [
-          [{ text: '🫓 Грати у Фокача Клікер!', web_app: { url: WEBAPP_URL } }],
-        ],
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: welcome,
+        reply_markup: {
+          inline_keyboard: [[{ text: '🫓 Грати у Фокача Клікер!', web_app: { url: WEBAPP_URL } }]],
+        },
       });
+      return res.status(200).json({ ok: true });
     }
 
-    // Будь-яке повідомлення — оновлюємо lastActive
-    if (msg?.from?.id) {
-      const chatId = msg.chat.id;
-      const name = msg.from.first_name || 'друже';
-      await redis(
-        'HSET',
-        'users',
-        String(chatId),
-        JSON.stringify({ name, lastActive: Date.now(), reminded: false }),
-      );
+    // ===== ADMIN COMMANDS =====
+    if (!isAdmin(userId)) {
+      return res.status(200).json({ ok: true });
+    }
+
+    // /admin — show panel
+    if (text === '/admin') {
+      const usersData = await redis('HGETALL', 'users');
+      const userCount = usersData?.result ? Math.floor(usersData.result.length / 2) : 0;
+
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text:
+          `👑 *АДМІН ПАНЕЛЬ*\n\n` +
+          `👥 Користувачів: *${userCount}*\n\n` +
+          `📋 *Команди:*\n` +
+          `/users — список всіх юзерів\n` +
+          `/broadcast <текст> — розсилка всім\n` +
+          `/give <кількість> — видати собі фокачі\n` +
+          `/giveto <username> <кількість> — видати комусь\n` +
+          `/check <username> — інфо про юзера`,
+        parse_mode: 'Markdown',
+      });
+      return res.status(200).json({ ok: true });
+    }
+
+    // /users — list all users
+    if (text === '/users') {
+      const usersData = await redis('HGETALL', 'users');
+      if (!usersData?.result || usersData.result.length === 0) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '👥 Юзерів поки нема' });
+        return res.status(200).json({ ok: true });
+      }
+
+      const entries = usersData.result;
+      let list = '👥 *Користувачі:*\n\n';
+      for (let i = 0; i < entries.length; i += 2) {
+        const id = entries[i];
+        try {
+          const u = JSON.parse(entries[i + 1]);
+          const ago = Math.floor((Date.now() - u.lastActive) / 60000);
+          const agoText = ago < 60 ? `${ago}хв` : ago < 1440 ? `${Math.floor(ago / 60)}г` : `${Math.floor(ago / 1440)}д`;
+          list += `• ${u.name}${u.username ? ` (@${u.username})` : ''} — ID: \`${id}\` — ${agoText} тому\n`;
+        } catch { /* skip */ }
+      }
+
+      await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: list, parse_mode: 'Markdown' });
+      return res.status(200).json({ ok: true });
+    }
+
+    // /broadcast <text>
+    if (text.startsWith('/broadcast ')) {
+      const broadcastText = text.slice(11).trim();
+      if (!broadcastText) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Вкажи текст: /broadcast <текст>' });
+        return res.status(200).json({ ok: true });
+      }
+
+      const usersData = await redis('HGETALL', 'users');
+      if (!usersData?.result) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Немає юзерів' });
+        return res.status(200).json({ ok: true });
+      }
+
+      const entries = usersData.result;
+      let sent = 0, failed = 0;
+
+      for (let i = 0; i < entries.length; i += 2) {
+        const uid = entries[i];
+        try {
+          await sendTg(TOKEN, 'sendMessage', {
+            chat_id: Number(uid),
+            text: `📢 *Оголошення:*\n\n${broadcastText}`,
+            parse_mode: 'Markdown',
+            reply_markup: {
+              inline_keyboard: [[{ text: '🫓 Грати!', web_app: { url: WEBAPP_URL } }]],
+            },
+          });
+          sent++;
+        } catch { failed++; }
+      }
+
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: `✅ Розсилка завершена!\n📨 Відправлено: ${sent}\n❌ Помилок: ${failed}`,
+      });
+      return res.status(200).json({ ok: true });
+    }
+
+    // /give <amount> — give focaccia to yourself
+    if (text.startsWith('/give ') && !text.startsWith('/giveto')) {
+      const amount = parseInt(text.split(' ')[1]);
+      if (!amount || amount <= 0) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Вкажи кількість: /give <число>' });
+        return res.status(200).json({ ok: true });
+      }
+
+      // Get existing reward and add
+      const existing = await redis('GET', `reward:${chatId}`);
+      const currentReward = existing?.result ? parseInt(existing.result) : 0;
+      await redis('SET', `reward:${chatId}`, String(currentReward + amount));
+
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: `✅ Нараховано *${amount.toLocaleString()}* фокач тобі!\n🫓 Зайди в гру щоб отримати.`,
+        parse_mode: 'Markdown',
+      });
+      return res.status(200).json({ ok: true });
+    }
+
+    // /giveto <username> <amount>
+    if (text.startsWith('/giveto ')) {
+      const parts = text.split(' ');
+      if (parts.length < 3) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Формат: /giveto <username> <кількість>' });
+        return res.status(200).json({ ok: true });
+      }
+
+      const targetUsername = parts[1].replace('@', '').toLowerCase();
+      const amount = parseInt(parts[2]);
+
+      if (!amount || amount <= 0) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Вкажи правильну кількість' });
+        return res.status(200).json({ ok: true });
+      }
+
+      // Find user by username
+      const targetData = await redis('HGET', 'usernames', targetUsername);
+      if (!targetData?.result) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: `❌ Юзер @${targetUsername} не знайдений. Він повинен спершу запустити бота.` });
+        return res.status(200).json({ ok: true });
+      }
+
+      const targetChatId = targetData.result;
+
+      // Add reward
+      const existing = await redis('GET', `reward:${targetChatId}`);
+      const currentReward = existing?.result ? parseInt(existing.result) : 0;
+      await redis('SET', `reward:${targetChatId}`, String(currentReward + amount));
+
+      // Notify the user
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: Number(targetChatId),
+        text: `🎁 Тобі нараховано *${amount.toLocaleString()}* фокач від адміна!\n🫓 Зайди в гру щоб отримати.`,
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [[{ text: '🫓 Забрати нагороду!', web_app: { url: WEBAPP_URL } }]],
+        },
+      });
+
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: `✅ Нараховано *${amount.toLocaleString()}* фокач юзеру @${targetUsername}!`,
+        parse_mode: 'Markdown',
+      });
+      return res.status(200).json({ ok: true });
+    }
+
+    // /check <username>
+    if (text.startsWith('/check ')) {
+      const targetUsername = text.split(' ')[1].replace('@', '').toLowerCase();
+      const targetData = await redis('HGET', 'usernames', targetUsername);
+      if (!targetData?.result) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: `❌ @${targetUsername} не знайдений` });
+        return res.status(200).json({ ok: true });
+      }
+
+      const targetChatId = targetData.result;
+      const userData = await redis('HGET', 'users', targetChatId);
+      const pending = await redis('GET', `reward:${targetChatId}`);
+
+      let info = `👤 *@${targetUsername}*\nID: \`${targetChatId}\`\n`;
+      if (userData?.result) {
+        try {
+          const u = JSON.parse(userData.result);
+          const ago = Math.floor((Date.now() - u.lastActive) / 60000);
+          info += `Ім'я: ${u.name}\nОстання активність: ${ago < 60 ? `${ago} хв` : `${Math.floor(ago / 60)} год`} тому\n`;
+        } catch { /* skip */ }
+      }
+      if (pending?.result && parseInt(pending.result) > 0) {
+        info += `🎁 Очікує нагорода: ${parseInt(pending.result).toLocaleString()} фокач`;
+      }
+
+      await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: info, parse_mode: 'Markdown' });
+      return res.status(200).json({ ok: true });
     }
 
     res.status(200).json({ ok: true });
