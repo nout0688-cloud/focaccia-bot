@@ -293,7 +293,7 @@ module.exports = async function handler(req, res) {
         text:
           `⚠️ *ПІДТВЕРДЖЕННЯ СКИДАННЯ АКАУНТУ*\n\n` +
           `Ви дійсно хочете скинути весь прогрес для @${targetUsername} (ID: \`${targetChatId}\`)?\n\n` +
-          `👉 Для підтвердження відправте:\n`/confirm_reset @${targetUsername}``,
+          `👉 Для підтвердження відправте:\n\`/confirm_reset @${targetUsername}\``,
         parse_mode: 'Markdown',
       });
       return res.status(200).json({ ok: true });
@@ -339,7 +339,7 @@ module.exports = async function handler(req, res) {
         text:
           `🚨 *УВАГА: СКИДАННЯ ВСІХ АКАУНТІВ!*\n\n` +
           `Це скине прогрес у ВСІХ зареєстрованих гравців (всього: ${userCount})!\n\n` +
-          `👉 Для підтвердження відправте ТОЧНО таку команду:\n`/confirm_reset_all YES``,
+          `👉 Для підтвердження відправте ТОЧНО таку команду:\n\`/confirm_reset_all YES\``,
         parse_mode: 'Markdown',
       });
       return res.status(200).json({ ok: true });
