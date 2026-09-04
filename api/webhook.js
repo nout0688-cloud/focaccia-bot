@@ -19,12 +19,32 @@ async function redis(...args) {
 }
 
 async function sendTg(token, method, body) {
-  const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  return res.json();
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      console.error('Telegram API error:', data);
+      // Auto-fallback if Markdown parse failed
+      if (body.parse_mode && data.description && data.description.includes("can't parse entities")) {
+        const retryBody = { ...body };
+        delete retryBody.parse_mode;
+        const retryRes = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(retryBody),
+        });
+        return retryRes.json();
+      }
+    }
+    return data;
+  } catch (err) {
+    console.error('sendTg fetch error:', err);
+    return null;
+  }
 }
 
 function isAdmin(userId) {
@@ -64,8 +84,10 @@ module.exports = async function handler(req, res) {
       await redis('HSET', 'usernames', username.toLowerCase(), String(chatId));
     }
 
+    const cmd = text.toLowerCase();
+
     // ===== /start =====
-    if (text === '/start') {
+    if (cmd === '/start' || cmd === 'start' || cmd === 'старт') {
       const welcome =
         `Привіт, ${name}! 👋\n\n` +
         `🫓 Фокача Клікер — клікай, їж, прокачуйся!\n\n` +
@@ -95,7 +117,7 @@ module.exports = async function handler(req, res) {
     }
 
     // /admin — show panel
-    if (text === '/admin') {
+    if (cmd === '/admin' || cmd === 'admin' || cmd === 'адмін' || cmd === 'админ') {
       const usersData = await redis('HGETALL', 'users');
       const userCount = usersData?.result ? Math.floor(usersData.result.length / 2) : 0;
 
@@ -105,20 +127,20 @@ module.exports = async function handler(req, res) {
           `👑 *АДМІН ПАНЕЛЬ*\n\n` +
           `👥 Користувачів: *${userCount}*\n\n` +
           `📋 *Команди:*\n` +
-          `/users — список всіх юзерів\n` +
-          `/broadcast <текст> — розсилка всім\n` +
-          `/give <кількість> — видати собі фокачі\n` +
-          `/giveto <username> <кількість> — видати комусь\n` +
-          `/check <username> — інфо про юзера\n` +
-          `/reset <username> — скинути акаунт юзера\n` +
-          `/reset_all — скинути акаунти ВСІХ гравців`,
+          `• \`/users\` — список всіх юзерів\n` +
+          `• \`/broadcast <текст>\` — розсилка всім\n` +
+          `• \`/give <кількість>\` — видати собі фокачі\n` +
+          `• \`/giveto <username> <кількість>\` — видати комусь\n` +
+          `• \`/check <username>\` — інфо про юзера\n` +
+          `• \`/reset <username>\` — скинути акаунт юзера\n` +
+          `• \`/reset_all\` — скинути акаунти ВСІХ гравців`,
         parse_mode: 'Markdown',
       });
       return res.status(200).json({ ok: true });
     }
 
     // /users — list all users
-    if (text === '/users') {
+    if (cmd === '/users' || cmd === 'users' || cmd === 'юзерс') {
       const usersData = await redis('HGETALL', 'users');
       if (!usersData?.result || usersData.result.length === 0) {
         await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '👥 Юзерів поки нема' });
@@ -142,8 +164,8 @@ module.exports = async function handler(req, res) {
     }
 
     // /broadcast <text>
-    if (text.startsWith('/broadcast ')) {
-      const broadcastText = text.slice(11).trim();
+    if (cmd.startsWith('/broadcast ') || cmd.startsWith('broadcast ')) {
+      const broadcastText = text.replace(/^\/?broadcast\s+/i, '').trim();
       if (!broadcastText) {
         await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Вкажи текст: /broadcast <текст>' });
         return res.status(200).json({ ok: true });
@@ -181,8 +203,8 @@ module.exports = async function handler(req, res) {
     }
 
     // /give <amount> — give focaccia to yourself
-    if (text.startsWith('/give ') && !text.startsWith('/giveto')) {
-      const amount = parseInt(text.split(' ')[1]);
+    if ((cmd.startsWith('/give ') || cmd.startsWith('give ')) && !cmd.includes('giveto')) {
+      const amount = parseInt(text.replace(/^\/?give\s+/i, '').trim());
       if (!amount || amount <= 0) {
         await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Вкажи кількість: /give <число>' });
         return res.status(200).json({ ok: true });
@@ -202,15 +224,16 @@ module.exports = async function handler(req, res) {
     }
 
     // /giveto <username> <amount>
-    if (text.startsWith('/giveto ')) {
-      const parts = text.split(' ');
-      if (parts.length < 3) {
+    if (cmd.startsWith('/giveto ') || cmd.startsWith('giveto ')) {
+      const raw = text.replace(/^\/?giveto\s+/i, '').trim();
+      const parts = raw.split(/\s+/);
+      if (parts.length < 2) {
         await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Формат: /giveto <username> <кількість>' });
         return res.status(200).json({ ok: true });
       }
 
-      const targetUsername = parts[1].replace('@', '').toLowerCase();
-      const amount = parseInt(parts[2]);
+      const targetUsername = parts[0].replace('@', '').toLowerCase();
+      const amount = parseInt(parts[1]);
 
       if (!amount || amount <= 0) {
         await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Вкажи правильну кількість' });
@@ -250,8 +273,8 @@ module.exports = async function handler(req, res) {
     }
 
     // /check <username>
-    if (text.startsWith('/check ')) {
-      const targetUsername = text.split(' ')[1].replace('@', '').toLowerCase();
+    if (cmd.startsWith('/check ') || cmd.startsWith('check ')) {
+      const targetUsername = text.replace(/^\/?check\s+/i, '').replace('@', '').toLowerCase().trim();
       const targetData = await redis('HGET', 'usernames', targetUsername);
       if (!targetData?.result) {
         await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: `❌ @${targetUsername} не знайдений` });
@@ -279,8 +302,8 @@ module.exports = async function handler(req, res) {
     }
 
     // /reset <username> — request single user reset
-    if (text.startsWith('/reset ') && !text.startsWith('/reset_all')) {
-      const targetUsername = text.split(' ')[1].replace('@', '').toLowerCase();
+    if ((cmd.startsWith('/reset ') || cmd.startsWith('reset ')) && !cmd.includes('reset_all')) {
+      const targetUsername = text.replace(/^\/?reset\s+/i, '').replace('@', '').toLowerCase().trim();
       const targetData = await redis('HGET', 'usernames', targetUsername);
       if (!targetData?.result) {
         await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: `❌ @${targetUsername} не знайдений` });
@@ -300,8 +323,8 @@ module.exports = async function handler(req, res) {
     }
 
     // /confirm_reset <username> — execute single user reset
-    if (text.startsWith('/confirm_reset ')) {
-      const targetUsername = text.split(' ')[1].replace('@', '').toLowerCase();
+    if (cmd.startsWith('/confirm_reset ') || cmd.startsWith('confirm_reset ')) {
+      const targetUsername = text.replace(/^\/?confirm_reset\s+/i, '').replace('@', '').toLowerCase().trim();
       const targetData = await redis('HGET', 'usernames', targetUsername);
       if (!targetData?.result) {
         await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: `❌ @${targetUsername} не знайдений` });
@@ -330,7 +353,7 @@ module.exports = async function handler(req, res) {
     }
 
     // /reset_all — request all users reset
-    if (text === '/reset_all') {
+    if (cmd === '/reset_all' || cmd === 'reset_all') {
       const usersData = await redis('HGETALL', 'users');
       const userCount = usersData?.result ? Math.floor(usersData.result.length / 2) : 0;
 
@@ -346,7 +369,7 @@ module.exports = async function handler(req, res) {
     }
 
     // /confirm_reset_all YES — execute all users reset
-    if (text === '/confirm_reset_all YES') {
+    if (cmd === '/confirm_reset_all yes' || cmd === 'confirm_reset_all yes') {
       const resetTime = Date.now();
       await redis('SET', 'global_reset_time', String(resetTime));
 
