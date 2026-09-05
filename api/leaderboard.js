@@ -26,6 +26,7 @@ function parsePlayers(data) {
     try {
       const p = JSON.parse(entries[i + 1]);
       if (p.ts && Date.now() - p.ts > FRESH_MS) continue; // протухлий запис
+      if (p.n && p.n.includes('\uFFFD')) continue; // пошкоджене кодування — приховуємо
       players.push({ id: entries[i], name: p.n || 'Гравець', username: p.u || '', total: p.t || 0, prestige: p.p || 0 });
     } catch { /* skip corrupted */ }
   }
