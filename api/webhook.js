@@ -131,6 +131,8 @@ module.exports = async function handler(req, res) {
           `• \`/broadcast <текст>\` — розсилка всім\n` +
           `• \`/give <кількість>\` — видати собі фокачі\n` +
           `• \`/giveto <username> <кількість>\` — видати комусь\n` +
+          `• \`/rebirth <кількість>\` — видати собі ребіртхи\n` +
+          `• \`/rebirthto <username> <кількість>\` — видати комусь ребіртхи\n` +
           `• \`/check <username>\` — інфо про юзера\n` +
           `• \`/reset <username>\` — скинути акаунт юзера\n` +
           `• \`/reset_all\` — скинути акаунти ВСІХ гравців`,
@@ -272,6 +274,76 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: true });
     }
 
+    // /rebirthto <username> <amount>
+    if (cmd.startsWith('/rebirthto ') || cmd.startsWith('rebirthto ')) {
+      const raw = text.replace(/^\/?rebirthto\s+/i, '').trim();
+      const parts = raw.split(/\s+/);
+      if (parts.length < 2) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Формат: /rebirthto <username> <кількість>' });
+        return res.status(200).json({ ok: true });
+      }
+
+      const targetUsername = parts[0].replace('@', '').toLowerCase();
+      const amount = parseInt(parts[1]);
+
+      if (!amount || amount <= 0) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Вкажи правильну кількість' });
+        return res.status(200).json({ ok: true });
+      }
+
+      // Find user by username
+      const targetData = await redis('HGET', 'usernames', targetUsername);
+      if (!targetData?.result) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: `❌ Юзер @${targetUsername} не знайдений. Він повинен спершу запустити бота.` });
+        return res.status(200).json({ ok: true });
+      }
+
+      const targetChatId = targetData.result;
+
+      // Add pending rebirths
+      const existingRb = await redis('GET', `rebirth:${targetChatId}`);
+      const currentRb = existingRb?.result ? parseInt(existingRb.result) : 0;
+      await redis('SET', `rebirth:${targetChatId}`, String(currentRb + amount));
+
+      // Notify the user
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: Number(targetChatId),
+        text: `🔄 Тобі нараховано *${amount}* ребіртх(ів) від адміна!\nЗайди в гру щоб отримати.`,
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [[{ text: '🫓 Забрати ребіртхи!', web_app: { url: WEBAPP_URL } }]],
+        },
+      });
+
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: `✅ Нараховано *${amount}* ребіртх(ів) юзеру @${targetUsername}!`,
+        parse_mode: 'Markdown',
+      });
+      return res.status(200).json({ ok: true });
+    }
+
+    // /rebirth <amount> — give rebirths to yourself
+    if ((cmd.startsWith('/rebirth ') || cmd.startsWith('rebirth ')) && !cmd.includes('rebirthto')) {
+      const amount = parseInt(text.replace(/^\/?rebirth\s+/i, '').trim());
+      if (!amount || amount <= 0) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Вкажи кількість: /rebirth <число>' });
+        return res.status(200).json({ ok: true });
+      }
+
+      // Get existing pending rebirths and add
+      const existing = await redis('GET', `rebirth:${chatId}`);
+      const currentRb = existing?.result ? parseInt(existing.result) : 0;
+      await redis('SET', `rebirth:${chatId}`, String(currentRb + amount));
+
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: `✅ Нараховано *${amount}* ребіртх(ів) тобі!\n🔄 Зайди в гру щоб отримати.`,
+        parse_mode: 'Markdown',
+      });
+      return res.status(200).json({ ok: true });
+    }
+
     // /check <username>
     if (cmd.startsWith('/check ') || cmd.startsWith('check ')) {
       const targetUsername = text.replace(/^\/?check\s+/i, '').replace('@', '').toLowerCase().trim();
@@ -284,6 +356,7 @@ module.exports = async function handler(req, res) {
       const targetChatId = targetData.result;
       const userData = await redis('HGET', 'users', targetChatId);
       const pending = await redis('GET', `reward:${targetChatId}`);
+      const pendingRb = await redis('GET', `rebirth:${targetChatId}`);
 
       let info = `👤 *@${targetUsername}*\nID: \`${targetChatId}\`\n`;
       if (userData?.result) {
@@ -294,7 +367,10 @@ module.exports = async function handler(req, res) {
         } catch { /* skip */ }
       }
       if (pending?.result && parseInt(pending.result) > 0) {
-        info += `🎁 Очікує нагорода: ${parseInt(pending.result).toLocaleString()} фокач`;
+        info += `🎁 Очікує нагорода: ${parseInt(pending.result).toLocaleString()} фокач\n`;
+      }
+      if (pendingRb?.result && parseInt(pendingRb.result) > 0) {
+        info += `🔄 Очікується ребіртхів: ${parseInt(pendingRb.result)}`;
       }
 
       await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: info, parse_mode: 'Markdown' });
@@ -335,6 +411,7 @@ module.exports = async function handler(req, res) {
       // Mark user for client reset and clear pending rewards
       await redis('SET', `reset:${targetChatId}`, '1');
       await redis('DEL', `reward:${targetChatId}`);
+      await redis('DEL', `rebirth:${targetChatId}`);
 
       // Notify target user
       try {
@@ -385,6 +462,7 @@ module.exports = async function handler(req, res) {
         const uid = entries[i];
         await redis('SET', `reset:${uid}`, '1');
         await redis('DEL', `reward:${uid}`);
+        await redis('DEL', `rebirth:${uid}`);
         count++;
 
         // Notify user

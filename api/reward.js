@@ -42,6 +42,7 @@ module.exports = async function handler(req, res) {
     if (resetFlag?.result || (globalResetTime > 0 && userLastReset < globalResetTime)) {
       if (resetFlag?.result) await redis('DEL', `reset:${userId}`);
       await redis('DEL', `reward:${userId}`);
+      await redis('DEL', `rebirth:${userId}`);
       return res.status(200).json({
         ok: true,
         reset: true,
@@ -52,10 +53,14 @@ module.exports = async function handler(req, res) {
     const data = await redis('GET', `reward:${userId}`);
     const amount = data?.result ? parseInt(data.result) : 0;
 
-    if (amount > 0) {
-      // Clear the reward after claiming
-      await redis('DEL', `reward:${userId}`);
-      return res.status(200).json({ ok: true, reward: amount });
+    const rbData = await redis('GET', `rebirth:${userId}`);
+    const rebirths = rbData?.result ? parseInt(rbData.result) : 0;
+
+    if (amount > 0 || rebirths > 0) {
+      // Clear pending grants after claiming
+      if (amount > 0) await redis('DEL', `reward:${userId}`);
+      if (rebirths > 0) await redis('DEL', `rebirth:${userId}`);
+      return res.status(200).json({ ok: true, reward: amount, rebirth: rebirths });
     }
 
     return res.status(200).json({ ok: true, reward: 0 });
