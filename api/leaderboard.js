@@ -5,6 +5,7 @@
  */
 
 const FRESH_MS = 30 * 24 * 60 * 60 * 1000; // гравців, які не заходили 30 днів, не показуємо
+const ONLINE_MS = 3 * 60 * 1000; // репорт кожні 60с — онлайн якщо свіжий ≤ 3 хв
 
 async function redis(...args) {
   const url = process.env.KV_REST_API_URL;
@@ -27,7 +28,14 @@ function parsePlayers(data) {
       const p = JSON.parse(entries[i + 1]);
       if (p.ts && Date.now() - p.ts > FRESH_MS) continue; // протухлий запис
       if (p.n && p.n.includes('\uFFFD')) continue; // пошкоджене кодування — приховуємо
-      players.push({ id: entries[i], name: p.n || 'Гравець', username: p.u || '', total: p.t || 0, prestige: p.p || 0 });
+      players.push({
+        id: entries[i],
+        name: p.n || 'Гравець',
+        username: p.u || '',
+        total: p.t || 0,
+        prestige: p.p || 0,
+        online: !!p.ts && Date.now() - p.ts < ONLINE_MS,
+      });
     } catch { /* skip corrupted */ }
   }
   players.sort((a, b) => b.total - a.total);
