@@ -134,6 +134,7 @@ module.exports = async function handler(req, res) {
           `• \`/rebirth <кількість>\` — видати собі ребіртхи\n` +
           `• \`/rebirthto <username> <кількість>\` — видати комусь ребіртхи\n` +
           `• \`/check <username>\` — інфо про юзера\n` +
+          `• \`/lb_clear\` — очистити лідерборд\n` +
           `• \`/reset <username>\` — скинути акаунт юзера\n` +
           `• \`/reset_all\` — скинути акаунти ВСІХ гравців`,
         parse_mode: 'Markdown',
@@ -374,6 +375,16 @@ module.exports = async function handler(req, res) {
       }
 
       await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: info, parse_mode: 'Markdown' });
+      return res.status(200).json({ ok: true });
+    }
+
+    // /lb_clear — wipe the leaderboard
+    if (cmd === '/lb_clear' || cmd === 'lb_clear') {
+      await redis('DEL', 'leaderboard');
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: '✅ Лідерборд очищено! Гравці повернуться туди протягом хвилини гри.',
+      });
       return res.status(200).json({ ok: true });
     }
 
