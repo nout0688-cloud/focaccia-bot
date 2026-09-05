@@ -136,6 +136,7 @@ module.exports = async function handler(req, res) {
           `• \`/check <username>\` — інфо про юзера\n` +
           `• \`/lb_clear\` — очистити лідерборд\n` +
           `• \`/reports\` — звіт античиту (хто детектило)\n` +
+          `• \`/warn <username>\` — видати знак ⚠️ вручну\n` +
           `• \`/unflag <username>\` — зняти знак ⚠️ з гравця\n` +
           `• \`/reset <username>\` — скинути акаунт юзера\n` +
           `• \`/reset_all\` — скинути акаунти ВСІХ гравців`,
@@ -373,7 +374,16 @@ module.exports = async function handler(req, res) {
         info += `🎁 Очікує нагорода: ${parseInt(pending.result).toLocaleString()} фокач\n`;
       }
       if (pendingRb?.result && parseInt(pendingRb.result) > 0) {
-        info += `🔄 Очікується ребіртхів: ${parseInt(pendingRb.result)}`;
+        info += `🔄 Очікується ребіртхів: ${parseInt(pendingRb.result)}\n`;
+      }
+      const acActive = await redis('HGET', 'ac_active', targetChatId);
+      const acTotal = await redis('HGET', 'ac_total', targetChatId);
+      if (acActive?.result) {
+        info += `⚠️ Античит: підозра АКТИВНА (знак у топі)\n`;
+      } else if (acTotal?.result && parseInt(acTotal.result) > 0) {
+        info += `🛡 Античит: детектів у минулому — ${parseInt(acTotal.result)}, зараз чистий\n`;
+      } else {
+        info += `🛡 Античит: Clear\n`;
       }
 
       await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: info, parse_mode: 'Markdown' });
@@ -451,6 +461,30 @@ module.exports = async function handler(req, res) {
       }
 
       await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: msg, parse_mode: 'Markdown' });
+      return res.status(200).json({ ok: true });
+    }
+
+    // /warn <username> — вручну видати знак ⚠️
+    if (cmd.startsWith('/warn ') || cmd.startsWith('warn ')) {
+      const targetUsername = text.replace(/^\/?warn\s+/i, '').replace('@', '').toLowerCase().trim();
+      if (!targetUsername) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Формат: /warn <username>' });
+        return res.status(200).json({ ok: true });
+      }
+      const targetData = await redis('HGET', 'usernames', targetUsername);
+      if (!targetData?.result) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: `❌ Юзер @${targetUsername} не знайдений. Він повинен спершу запустити бота.` });
+        return res.status(200).json({ ok: true });
+      }
+
+      const targetChatId = targetData.result;
+      await redis('HINCRBY', 'ac_total', targetChatId, '1');
+      await redis('HSET', 'ac_active', targetChatId, '1');
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: `⚠️ Знак видано *@${targetUsername}*. У лідерборді біля його ніка буде попередження, у /reports — плюс один детект.\nЗняти: \`/unflag @${targetUsername}\``,
+        parse_mode: 'Markdown',
+      });
       return res.status(200).json({ ok: true });
     }
 
