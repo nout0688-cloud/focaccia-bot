@@ -383,9 +383,11 @@ module.exports = async function handler(req, res) {
     // /lb_clear — wipe the leaderboard
     if (cmd === '/lb_clear' || cmd === 'lb_clear') {
       await redis('DEL', 'leaderboard');
+      await redis('DEL', 'ac_total');
+      await redis('DEL', 'ac_active');
       await sendTg(TOKEN, 'sendMessage', {
         chat_id: chatId,
-        text: '✅ Лідерборд очищено! Гравці повернуться туди протягом хвилини гри.',
+        text: '✅ Лідерборд і лічильники античиту очищено! Гравці повернуться туди протягом хвилини гри.',
       });
       return res.status(200).json({ ok: true });
     }
