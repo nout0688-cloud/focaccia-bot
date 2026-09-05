@@ -62,7 +62,7 @@ module.exports = async function handler(req, res) {
         return res.status(200).json({ ok: true });
       }
 
-      const total = Math.max(0, Math.min(Number(body.total) || 0, 1e15));
+      const total = Math.max(0, Math.min(Number(body.total) || 0, 1e24));
       const prestige = Math.max(0, Math.min(parseInt(body.prestige, 10) || 0, 1e6));
       const clicks = Math.max(0, Math.min(Math.floor(Number(body.clicks)) || 0, 1e9));
       const name = String(body.name || 'Гравець')
