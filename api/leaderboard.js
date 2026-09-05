@@ -43,7 +43,7 @@ module.exports = async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(200).end();
 
   try {
-    // ===== POST — оновити статистику гравця =====
+    // ===== POST — оновити статистику гравця / подія античиту =====
     if (req.method === 'POST') {
       const body = req.body || {};
       const userId = String(body.userId || '');
@@ -51,15 +51,44 @@ module.exports = async function handler(req, res) {
         return res.status(400).json({ ok: false, error: 'invalid userId' });
       }
 
+      // Події античиту: flag — детект, clear — пройдено випробування
+      if (body.event === 'flag') {
+        await redis('HINCRBY', 'ac_total', userId, '1');
+        await redis('HSET', 'ac_active', userId, '1');
+        return res.status(200).json({ ok: true });
+      }
+      if (body.event === 'clear') {
+        await redis('HDEL', 'ac_active', userId);
+        return res.status(200).json({ ok: true });
+      }
+
       const total = Math.max(0, Math.min(Number(body.total) || 0, 1e15));
       const prestige = Math.max(0, Math.min(parseInt(body.prestige, 10) || 0, 1e6));
+      const clicks = Math.max(0, Math.min(Math.floor(Number(body.clicks)) || 0, 1e9));
       const name = String(body.name || 'Гравець')
         .replace(/\uFFFD/g, '') // вирізаємо пошкоджені символи кодування
         .trim()
         .slice(0, 24) || 'Гравець';
       const username = String(body.username || '').replace(/[^a-zA-Z0-9_]/g, '').slice(0, 32);
 
-      await redis('HSET', 'leaderboard', userId, JSON.stringify({ n: name, u: username, t: total, p: prestige, ts: Date.now() }));
+      // Античит: порівнюємо дельту кліків з попереднього репорту.
+      // Рука людини не дає стабільно > 400 кл/мин (6.7/с) цілодобово.
+      const prevRaw = await redis('HGET', 'leaderboard', userId);
+      if (prevRaw?.result) {
+        try {
+          const prev = JSON.parse(prevRaw.result);
+          if (typeof prev.k === 'number' && prev.ts) {
+            const dClicks = clicks - prev.k;
+            const dMin = (Date.now() - prev.ts) / 60000;
+            if (dClicks > 0 && dMin > 0 && dClicks / dMin > 400) {
+              await redis('HINCRBY', 'ac_total', userId, '1');
+              await redis('HSET', 'ac_active', userId, '1');
+            }
+          }
+        } catch { /* skip corrupted */ }
+      }
+
+      await redis('HSET', 'leaderboard', userId, JSON.stringify({ n: name, u: username, t: total, p: prestige, k: clicks, ts: Date.now() }));
 
       // Рахуємо місце гравця одразу після оновлення
       const rank = parsePlayers(await redis('HGETALL', 'leaderboard')).findIndex((p) => p.id === userId) + 1;
@@ -67,9 +96,17 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: true, rank: rank > 0 ? rank : null });
     }
 
-    // ===== GET — топ гравців =====
-    const players = parsePlayers(await redis('HGETALL', 'leaderboard'));
-    return res.status(200).json({ ok: true, players: players.slice(0, 50) });
+    // ===== GET — топ гравців (з позначками ⚠️) =====
+    const activeData = await redis('HGETALL', 'ac_active');
+    const activeSet = new Set();
+    if (activeData?.result) {
+      for (let i = 0; i < activeData.result.length; i += 2) activeSet.add(activeData.result[i]);
+    }
+
+    const players = parsePlayers(await redis('HGETALL', 'leaderboard'))
+      .slice(0, 50)
+      .map((p) => ({ ...p, flag: activeSet.has(p.id) }));
+    return res.status(200).json({ ok: true, players });
   } catch (err) {
     console.error('Leaderboard error:', err);
     if (req.method === 'POST') return res.status(200).json({ ok: false });

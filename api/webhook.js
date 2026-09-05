@@ -135,6 +135,8 @@ module.exports = async function handler(req, res) {
           `• \`/rebirthto <username> <кількість>\` — видати комусь ребіртхи\n` +
           `• \`/check <username>\` — інфо про юзера\n` +
           `• \`/lb_clear\` — очистити лідерборд\n` +
+          `• \`/reports\` — звіт античиту (хто детектило)\n` +
+          `• \`/unflag <username>\` — зняти знак ⚠️ з гравця\n` +
           `• \`/reset <username>\` — скинути акаунт юзера\n` +
           `• \`/reset_all\` — скинути акаунти ВСІХ гравців`,
         parse_mode: 'Markdown',
@@ -385,6 +387,84 @@ module.exports = async function handler(req, res) {
         chat_id: chatId,
         text: '✅ Лідерборд очищено! Гравці повернуться туди протягом хвилини гри.',
       });
+      return res.status(200).json({ ok: true });
+    }
+
+    // /reports — античит: хто детектило, хто чистий
+    if (cmd === '/reports' || cmd === 'reports' || cmd === 'репортс') {
+      const totals = await redis('HGETALL', 'ac_total');
+      const active = await redis('HGETALL', 'ac_active');
+      const usersData = await redis('HGETALL', 'users');
+
+      // id → як показувати (username або ім'я)
+      const names = {};
+      if (usersData?.result) {
+        for (let i = 0; i < usersData.result.length; i += 2) {
+          try {
+            const u = JSON.parse(usersData.result[i + 1]);
+            names[usersData.result[i]] = u.username ? `@${u.username}` : u.name;
+          } catch { /* skip */ }
+        }
+      }
+
+      const activeIds = new Set();
+      if (active?.result) {
+        for (let i = 0; i < active.result.length; i += 2) activeIds.add(active.result[i]);
+      }
+
+      const flagged = [];
+      if (totals?.result) {
+        for (let i = 0; i < totals.result.length; i += 2) {
+          const c = parseInt(totals.result[i + 1]) || 0;
+          if (c > 0) flagged.push({ id: totals.result[i], c });
+        }
+        flagged.sort((a, b) => b.c - a.c);
+      }
+
+      let msg = '🛡 *АНТИЧИТ ЗВІТ*\n\n⚠️ *ДЕТЕКТИЛО:*\n';
+      if (flagged.length === 0) {
+        msg += 'поки нікого — усі чисті 👼\n';
+      } else {
+        flagged.slice(0, 20).forEach((f, i) => {
+          const who = names[f.id] || `\`${f.id}\``;
+          const liveMark = activeIds.has(f.id) ? ' 🔴' : '';
+          msg += `${i + 1}. ${who} — *${f.c}* раз(ів)${liveMark}\n`;
+        });
+        if (flagged.length > 20) msg += `…і ще ${flagged.length - 20}\n`;
+      }
+
+      const flaggedIds = new Set(flagged.map((f) => f.id));
+      const clearIds = Object.keys(names).filter((id) => !flaggedIds.has(id));
+      msg += '\n✅ *CLEAR:*\n';
+      if (clearIds.length === 0) {
+        msg += 'поки нікого не зареєстровано чистим';
+      } else {
+        const lines = clearIds.map((id) => `• ${names[id]} — Clear`);
+        const budget = Math.max(0, Math.floor((3600 - msg.length) / 40));
+        if (lines.length <= budget) {
+          msg += lines.join('\n');
+        } else {
+          msg += lines.slice(0, budget).join('\n') + `\n…і ще ${lines.length - budget} гравців`;
+        }
+      }
+
+      await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: msg, parse_mode: 'Markdown' });
+      return res.status(200).json({ ok: true });
+    }
+
+    // /unflag <username> — зняти знак ⚠️ і обнулити детекти
+    if (cmd.startsWith('/unflag ') || cmd.startsWith('unflag ')) {
+      const targetUsername = text.replace(/^\/?unflag\s+/i, '').replace('@', '').toLowerCase().trim();
+      const targetData = await redis('HGET', 'usernames', targetUsername);
+      if (!targetData?.result) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: `❌ @${targetUsername} не знайдений` });
+        return res.status(200).json({ ok: true });
+      }
+
+      const targetChatId = targetData.result;
+      await redis('HDEL', 'ac_active', targetChatId);
+      await redis('HDEL', 'ac_total', targetChatId);
+      await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: `✅ Знак ⚠️ знято з @${targetUsername}, детекти обнулено.` });
       return res.status(200).json({ ok: true });
     }
 
