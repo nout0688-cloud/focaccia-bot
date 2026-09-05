@@ -52,7 +52,10 @@ module.exports = async function handler(req, res) {
 
       const total = Math.max(0, Math.min(Number(body.total) || 0, 1e15));
       const prestige = Math.max(0, Math.min(parseInt(body.prestige, 10) || 0, 1e6));
-      const name = String(body.name || 'Гравець').slice(0, 24);
+      const name = String(body.name || 'Гравець')
+        .replace(/\uFFFD/g, '') // вирізаємо пошкоджені символи кодування
+        .trim()
+        .slice(0, 24) || 'Гравець';
       const username = String(body.username || '').replace(/[^a-zA-Z0-9_]/g, '').slice(0, 32);
 
       await redis('HSET', 'leaderboard', userId, JSON.stringify({ n: name, u: username, t: total, p: prestige, ts: Date.now() }));
