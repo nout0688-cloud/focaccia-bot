@@ -153,6 +153,9 @@ module.exports = async function handler(req, res) {
       const storedTotal = frozen ? prev.t : total;
 
       await redis('HSET', 'leaderboard', userId, JSON.stringify({ n: name, u: username, t: storedTotal, p: prestige, k: clicks, ts: now }));
+      const focaccia = Math.max(0, Math.floor(Number(body.focaccia)) || 0);
+      const diamonds = Math.max(0, Math.floor(Number(body.diamonds)) || 0);
+      await redis('HSET', 'user_balance', userId, JSON.stringify({ f: focaccia, d: diamonds, ts: now }));
 
       // Рахуємо місце гравця одразу після оновлення
       const rank = parsePlayers(await redis('HGETALL', 'leaderboard')).findIndex((p) => p.id === userId) + 1;

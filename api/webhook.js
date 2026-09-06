@@ -165,7 +165,25 @@ module.exports = async function handler(req, res) {
       if (dAction === 'stake' && parts[2] && parts[3] && parts[4]) {
         const targetId = parts[2];
         const cur = parts[3];
-        const stake = parts[4];
+        const stake = parseInt(parts[4]) || 0;
+
+        // Перевірка балансу творця дуелі
+        const balData = await redis('HGET', 'user_balance', String(cqChat));
+        if (balData?.result) {
+          try {
+            const bObj = JSON.parse(balData.result);
+            const userBal = cur === 'gem' ? (bObj.d || 0) : (bObj.f || 0);
+            if (userBal < stake) {
+              const sym = cur === 'gem' ? '💎' : '🫓';
+              await sendTg(TOKEN, 'sendMessage', {
+                chat_id: Number(cqChat),
+                text: `❌ У тебе недостатньо коштів для цієї ставки!\n💰 Твій баланс: ${userBal.toLocaleString('ru')} ${sym}\n⚔️ Потрібно: ${stake.toLocaleString('ru')} ${sym}\n\nЗайди в гру або вибери меншу ставку!`,
+              });
+              return res.status(200).json({ ok: true });
+            }
+          } catch { /* */ }
+        }
+
         const goals = [100, 250, 500, 1000];
         const rows = goals.map((g) => [{ text: `🎯 ${g} тапов`, callback_data: `duel:goal:${targetId}:${cur}:${stake}:${g}` }]);
         rows.push([{ text: '❌ Отмена', callback_data: 'duel:cancel' }]);
