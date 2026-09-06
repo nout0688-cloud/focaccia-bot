@@ -391,6 +391,6 @@ module.exports = async function handler(req, res) {
     });
   } catch (err) {
     console.error('Duel error:', err);
-    return res.status(200).json({ ok: false, error: 'internal', details: err.message, stack: err.stack });
+    return res.status(200).json({ ok: false, error: 'internal' });
   }
 };
