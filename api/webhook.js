@@ -162,7 +162,7 @@ module.exports = async function handler(req, res) {
       // шаг 3: цель (сколько тапнуть)
       if (dAction === 'stake' && parts[3] && parts[4] && parts[5]) {
         const goals = [100, 250, 500, 1000];
-        const rows = goals.map((g) => [{ text: `🎯 ${g} тапов`, callback_data: `duel:goal:${parts[3]}:${parts[4]}:${parts[5]}` }]);
+        const rows = goals.map((g) => [{ text: `🎯 ${g} тапов`, callback_data: `duel:goal:${parts[3]}:${parts[4]}:${parts[5]}:${g}` }]);
         rows.push([{ text: '❌ Отмена', callback_data: 'duel:cancel' }]);
         await sendTg(cqChat, '🎯 Цель — кто быстрее наберёт тапы:', { reply_markup: { inline_keyboard: rows } });
         return res.status(200).json({ ok: true });
@@ -171,14 +171,14 @@ module.exports = async function handler(req, res) {
       // шаг 4: длительность раунда → создание дуэли
       if (dAction === 'goal' && parts[3] && parts[4] && parts[5] && parts[6]) {
         const times = [[120000, '2 мин'], [180000, '3 мин'], [300000, '5 мин'], [600000, '10 мин']];
-        const rows = times.map(([ms, label]) => [{ text: `⏱ ${label}`, callback_data: `duel:time:${parts[3]}:${parts[4]}:${parts[5]}:${ms}` }]);
+        const rows = times.map(([ms, label]) => [{ text: `⏱ ${label}`, callback_data: `duel:time:${parts[3]}:${parts[4]}:${parts[5]}:${parts[6]}:${ms}` }]);
         rows.push([{ text: '❌ Отмена', callback_data: 'duel:cancel' }]);
         await sendTg(cqChat, '⏱ Длительность раунда:', { reply_markup: { inline_keyboard: rows } });
         return res.status(200).json({ ok: true });
       }
 
       // шаг 5: создание дуэли со всеми параметрами
-      if (dAction === 'time' && parts[3] && parts[4] && parts[5] && parts[6]) {
+      if (dAction === 'time' && parts[3] && parts[4] && parts[5] && parts[6] && parts[7]) {
         const targetId = parts[3];
         const stakeCur = parts[4] === 'gem' ? 'gem' : 'foc';
         const stake = parseInt(parts[5]) || 0;

@@ -220,6 +220,15 @@ module.exports = async function handler(req, res) {
         return res.status(200).json({ ok: true });
       }
 
+      // --- внести ставку (эскроу) ---
+      if (action === 'escrow') {
+        const paid = Math.floor(Number(body.paid)) || 0;
+        if (paid > 0) {
+          await redis('HSET', `duel_escrow:${duelId}`, userId, String(paid));
+        }
+        return res.status(200).json({ ok: true });
+      }
+
       return res.status(400).json({ ok: false, error: 'unknown action' });
     }
 
@@ -351,6 +360,17 @@ module.exports = async function handler(req, res) {
     const oppMissing = duel.stage === 'paused' || (duel.stage === 'live' && oppSeenTs > 0 && now - oppSeenTs > PAUSE_MS / 2);
     const pausedLeft = duel.stage === 'paused' ? Math.max(0, PAUSE_MS - (now - (duel.pausedAt || now))) : 0;
 
+    const escrowRaw = await redis('HGETALL', `duel_escrow:${duelId}`);
+    let pot = 0;
+    let myPaid = 0;
+    if (escrowRaw?.result) {
+      for (let i = 0; i < escrowRaw.result.length; i += 2) {
+        const val = parseInt(escrowRaw.result[i + 1]) || 0;
+        pot += val;
+        if (escrowRaw.result[i] === userId) myPaid = val;
+      }
+    }
+
     return res.status(200).json({
       ok: true, v: 'v5.1.1',
       stage: duel.stage,
@@ -366,6 +386,8 @@ module.exports = async function handler(req, res) {
       winner: duel.winner || null,
       reason: duel.reason || null,
       pausedLeft,
+      pot,
+      myPaid,
     });
   } catch (err) {
     console.error('Duel error:', err);
