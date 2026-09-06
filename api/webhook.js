@@ -90,7 +90,7 @@ module.exports = async function handler(req, res) {
       try {
         // меню выбора соперника
         if (dAction === 'menu') {
-        await sendTg(cqChat, '⚔️ Кого хочешь вызвать на дуэль?\nКто быстрее накликает 100 фокач — тот победил (+5💎)!', {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: Number(cqChat), text: '⚔️ Кого хочешь вызвать на дуэль?\nКто быстрее накликает 100 фокач — тот победил (+5💎)!',
           reply_markup: {
             inline_keyboard: [
               [{ text: '👥 Из списка игроков', callback_data: 'duel:players' }],
@@ -116,7 +116,7 @@ module.exports = async function handler(req, res) {
           list.sort((a, b) => b.last - a.last);
         }
         if (list.length === 0) {
-          await sendTg(cqChat, '👥 Пока нет других игроков — позови друга поставить игру!');
+          await sendTg(TOKEN, 'sendMessage', { chat_id: Number(cqChat), text: '👥 Пока нет других игроков — позови друга поставить игру!' });
           return res.status(200).json({ ok: true });
         }
         const top = list.slice(0, 20);
@@ -124,26 +124,26 @@ module.exports = async function handler(req, res) {
         for (let i = 0; i < top.length; i += 2) {
           rows.push(top.slice(i, i + 2).map((p) => ({ text: p.username ? `@${p.username}` : p.name, callback_data: `duel:chal:${p.id}` })));
         }
-        await sendTg(cqChat, '👥 Выбери соперника:', { reply_markup: { inline_keyboard: rows } });
+        await sendTg(TOKEN, 'sendMessage', { chat_id: Number(cqChat), text: '👥 Выбери соперника:', reply_markup: { inline_keyboard: rows } });
         return res.status(200).json({ ok: true });
       }
 
       // ввод юзернейма
       if (dAction === 'byname') {
         await redis('SET', `duel_await:${cqChat}`, 'duel', 'EX', 300);
-        await sendTg(cqChat, '✍️ Напиши юзернейм соперника (например @spuod):');
+        await sendTg(TOKEN, 'sendMessage', { chat_id: Number(cqChat), text: '✍️ Напиши юзернейм соперника (например @spuod):' });
         return res.status(200).json({ ok: true });
       }
 
       // вызов конкретному игроку
       if (dAction === 'chal' && dArg) {
         if (String(dArg) === String(cqChat)) {
-          await sendTg(cqChat, '❌ Нельзя вызвать самого себя');
+          await sendTg(TOKEN, 'sendMessage', { chat_id: Number(cqChat), text: '❌ Нельзя вызвать самого себя' });
           return res.status(200).json({ ok: true });
         }
         const tData = await redis('HGET', 'users', dArg);
         if (!tData?.result) {
-          await sendTg(cqChat, '❌ Игрок не найден');
+          await sendTg(TOKEN, 'sendMessage', { chat_id: Number(cqChat), text: '❌ Игрок не найден' });
           return res.status(200).json({ ok: true });
         }
         let tName = 'Гравець';
@@ -161,10 +161,10 @@ module.exports = async function handler(req, res) {
         const data = await apiRes.json();
         if (!data.ok) {
           const why = data.error === 'shadow' ? '🚫 Карма слишком низка — дуэли закрыты (Тінь бабусі)' : '❌ Не удалось создать дуэль';
-          await sendTg(cqChat, why);
+          await sendTg(TOKEN, 'sendMessage', { chat_id: Number(cqChat), text: why });
           return res.status(200).json({ ok: true });
         }
-        await sendTg(cqChat, `⚔️ Вызов отправлен ${tName}! У него 5 минут на ответ.`);
+        await sendTg(TOKEN, 'sendMessage', { chat_id: Number(cqChat), text: `⚔️ Вызов отправлен ${tName}! У него 5 минут на ответ.` });
         return res.status(200).json({ ok: true });
       }
 
@@ -179,7 +179,7 @@ module.exports = async function handler(req, res) {
         const data = await apiRes.json();
         if (!data.ok) {
           // уведомление вызывающему уже отправляет /api/duel
-          await sendTg(cqChat, '⏱ Время вышло — дуэль отменена.');
+          await sendTg(TOKEN, 'sendMessage', { chat_id: Number(cqChat), text: '⏱ Время вышло — дуэль отменена.' });
         }
         // уведомления обоим игрокам с кнопкой мини-аппа отправляет /api/duel
         return res.status(200).json({ ok: true });
@@ -198,7 +198,7 @@ module.exports = async function handler(req, res) {
 
       return res.status(200).json({ ok: true });
       } catch (e) {
-        try { await sendTg(cqChat, `🐞 Ошибка дуэли: ${e.message}`); } catch { /* */ }
+        try { await sendTg(TOKEN, 'sendMessage', { chat_id: Number(cqChat), text: `🐞 Ошибка дуэли: ${e.message}` }); } catch { /* */ }
         return res.status(200).json({ ok: true });
       }
     }
@@ -231,14 +231,14 @@ module.exports = async function handler(req, res) {
     if (duelAwait?.result === 'duel') {
       await redis('DEL', `duel_await:${chatId}`);
       if (text.startsWith('/')) {
-        await sendTg(chatId, 'Ввод юзернейма отменён.');
+        await sendTg(TOKEN, 'sendMessage', { chat_id: Number(chatId), text: 'Ввод юзернейма отменён.' });
         return res.status(200).json({ ok: true });
       }
       const uname = text.replace(/^@/, '').toLowerCase().trim();
       const tId = await redis('HGET', 'usernames', uname);
       if (!tId?.result) {
         await redis('SET', `duel_await:${chatId}`, 'duel', 'EX', 300);
-        await sendTg(chatId, `❌ Игрок @${uname} не найден. Попробуй ещё раз:`);
+        await sendTg(TOKEN, 'sendMessage', { chat_id: Number(chatId), text: `❌ Игрок @${uname} не найден. Попробуй ещё раз:` });
         return res.status(200).json({ ok: true });
       }
       const host = req.headers.host || 'focaccia-bot.vercel.app';
@@ -252,9 +252,9 @@ module.exports = async function handler(req, res) {
       });
       const data = await apiRes.json();
       if (!data.ok) {
-        await sendTg(chatId, data.error === 'shadow' ? '🚫 Карма слишком низка — дуэли закрыты' : '❌ Не удалось создать дуэль');
+        await sendTg(TOKEN, 'sendMessage', { chat_id: Number(chatId), text: data.error === 'shadow' ? '🚫 Карма слишком низка — дуэли закрыты' : '❌ Не удалось создать дуэль' });
       } else {
-        await sendTg(chatId, `⚔️ Вызов отправлен @${uname}! У него 5 минут на ответ.`);
+        await sendTg(TOKEN, 'sendMessage', { chat_id: Number(chatId), text: `⚔️ Вызов отправлен @${uname}! У него 5 минут на ответ.` });
       }
       return res.status(200).json({ ok: true });
     }
