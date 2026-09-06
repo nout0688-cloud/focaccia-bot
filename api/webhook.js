@@ -78,15 +78,6 @@ module.exports = async function handler(req, res) {
       const dAction = parts[1];
       const dArg = parts[2];
 
-      // временная отладка: показываем, что пришла кнопка
-      try {
-        await fetch(`https://api.telegram.org/bot${TOKEN}/sendMessage`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ chat_id: Number(cqChat), text: `🐞 debug: кнопка «${dAction}» ${dArg || ''}` }),
-        });
-      } catch { /* ignore */ }
-
       try {
         // меню выбора соперника
         if (dAction === 'menu') {
@@ -198,7 +189,7 @@ module.exports = async function handler(req, res) {
 
       return res.status(200).json({ ok: true });
       } catch (e) {
-        try { await sendTg(TOKEN, 'sendMessage', { chat_id: Number(cqChat), text: `🐞 Ошибка дуэли: ${e.message}` }); } catch { /* */ }
+        console.error('Duel callback error:', dAction, e.message);
         return res.status(200).json({ ok: true });
       }
     }
