@@ -61,7 +61,135 @@ module.exports = async function handler(req, res) {
 
   try {
     const update = req.body;
-    const msg = update?.message;
+
+    // ===== ⚔️ ДУЭЛИ: inline-кнопки =====
+    const cq = update.callback_query;
+    if (cq && typeof cq.data === 'string' && cq.data.startsWith('duel:')) {
+      try {
+        await fetch(`https://api.telegram.org/bot${TOKEN}/answerCallbackQuery`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ callback_query_id: cq.id }),
+        });
+      } catch { /* ignore */ }
+
+      const cqChat = cq.message?.chat?.id ?? cq.from.id;
+      const parts = cq.data.split(':');
+      const dAction = parts[1];
+      const dArg = parts[2];
+
+      // меню выбора соперника
+      if (dAction === 'menu') {
+        await sendTg(cqChat, '⚔️ Кого хочешь вызвать на дуэль?\nКто быстрее накликает 100 фокач — тот победил (+5💎)!', {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '👥 Из списка игроков', callback_data: 'duel:players' }],
+              [{ text: '✍️ По юзернейму', callback_data: 'duel:byname' }],
+            ],
+          },
+        });
+        return res.status(200).json({ ok: true });
+      }
+
+      // список игроков (последние активные, без себя)
+      if (dAction === 'players') {
+        const usersData = await redis('HGETALL', 'users');
+        const list = [];
+        if (usersData?.result) {
+          for (let i = 0; i < usersData.result.length; i += 2) {
+            if (String(usersData.result[i]) === String(cqChat)) continue;
+            try {
+              const u = JSON.parse(usersData.result[i + 1]);
+              list.push({ id: usersData.result[i], name: u.name, username: u.username, last: u.lastActive || 0 });
+            } catch { /* skip */ }
+          }
+          list.sort((a, b) => b.last - a.last);
+        }
+        if (list.length === 0) {
+          await sendTg(cqChat, '👥 Пока нет других игроков — позови друга поставить игру!');
+          return res.status(200).json({ ok: true });
+        }
+        const top = list.slice(0, 20);
+        const rows = [];
+        for (let i = 0; i < top.length; i += 2) {
+          rows.push(top.slice(i, i + 2).map((p) => ({ text: p.username ? `@${p.username}` : p.name, callback_data: `duel:chal:${p.id}` })));
+        }
+        await sendTg(cqChat, '👥 Выбери соперника:', { reply_markup: { inline_keyboard: rows } });
+        return res.status(200).json({ ok: true });
+      }
+
+      // ввод юзернейма
+      if (dAction === 'byname') {
+        await redis('SET', `duel_await:${cqChat}`, 'duel', 'EX', 300);
+        await sendTg(cqChat, '✍️ Напиши юзернейм соперника (например @spuod):');
+        return res.status(200).json({ ok: true });
+      }
+
+      // вызов конкретному игроку
+      if (dAction === 'chal' && dArg) {
+        if (String(dArg) === String(cqChat)) {
+          await sendTg(cqChat, '❌ Нельзя вызвать самого себя');
+          return res.status(200).json({ ok: true });
+        }
+        const tData = await redis('HGET', 'users', dArg);
+        if (!tData?.result) {
+          await sendTg(cqChat, '❌ Игрок не найден');
+          return res.status(200).json({ ok: true });
+        }
+        let tName = 'Гравець';
+        let myName = 'Гравець';
+        try { const u = JSON.parse(tData.result); tName = u.username ? `@${u.username}` : u.name; } catch { /* */ }
+        const myData = await redis('HGET', 'users', String(cqChat));
+        if (myData?.result) { try { myName = JSON.parse(myData.result).name || myName; } catch { /* */ } }
+
+        const host = req.headers.host || 'focaccia-bot.vercel.app';
+        const apiRes = await fetch(`https://${host}/api/duel`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'challenge', from: cqChat, fromName: myName, to: dArg }),
+        });
+        const data = await apiRes.json();
+        if (!data.ok) {
+          const why = data.error === 'shadow' ? '🚫 Карма слишком низка — дуэли закрыты (Тінь бабусі)' : '❌ Не удалось создать дуэль';
+          await sendTg(cqChat, why);
+          return res.status(200).json({ ok: true });
+        }
+        await sendTg(cqChat, `⚔️ Вызов отправлен ${tName}! У него 5 минут на ответ.`);
+        return res.status(200).json({ ok: true });
+      }
+
+      // принять вызов
+      if (dAction === 'accept' && dArg) {
+        const host = req.headers.host || 'focaccia-bot.vercel.app';
+        const apiRes = await fetch(`https://${host}/api/duel`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'accept', duelId: dArg, userId: cqChat }),
+        });
+        const data = await apiRes.json();
+        if (!data.ok) {
+          // уведомление вызывающему уже отправляет /api/duel
+          await sendTg(cqChat, '⏱ Время вышло — дуэль отменена.');
+        }
+        // уведомления обоим игрокам с кнопкой мини-аппа отправляет /api/duel
+        return res.status(200).json({ ok: true });
+      }
+
+      // отклонить вызов
+      if (dAction === 'decline' && dArg) {
+        const host = req.headers.host || 'focaccia-bot.vercel.app';
+        await fetch(`https://${host}/api/duel`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'decline', duelId: dArg, userId: cqChat }),
+        });
+        return res.status(200).json({ ok: true });
+      }
+
+      return res.status(200).json({ ok: true });
+    }
+
+    const msg = update.message;
     if (!msg?.text) return res.status(200).json({ ok: true });
 
     const chatId = msg.chat.id;
@@ -84,6 +212,39 @@ module.exports = async function handler(req, res) {
       await redis('HSET', 'usernames', username.toLowerCase(), String(chatId));
     }
 
+    // ⚔️ ожидание ввода юзернейма для дуэли
+    const duelAwait = await redis('GET', `duel_await:${chatId}`);
+    if (duelAwait?.result === 'duel') {
+      await redis('DEL', `duel_await:${chatId}`);
+      if (text.startsWith('/')) {
+        await sendTg(chatId, 'Ввод юзернейма отменён.');
+        return res.status(200).json({ ok: true });
+      }
+      const uname = text.replace(/^@/, '').toLowerCase().trim();
+      const tId = await redis('HGET', 'usernames', uname);
+      if (!tId?.result) {
+        await redis('SET', `duel_await:${chatId}`, 'duel', 'EX', 300);
+        await sendTg(chatId, `❌ Игрок @${uname} не найден. Попробуй ещё раз:`);
+        return res.status(200).json({ ok: true });
+      }
+      const host = req.headers.host || 'focaccia-bot.vercel.app';
+      let myName = 'Гравець';
+      const myRaw = await redis('HGET', 'users', String(chatId));
+      if (myRaw?.result) { try { myName = JSON.parse(myRaw.result).name || myName; } catch { /* */ } }
+      const apiRes = await fetch(`https://${host}/api/duel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'challenge', from: chatId, fromName: myName, to: tId.result }),
+      });
+      const data = await apiRes.json();
+      if (!data.ok) {
+        await sendTg(chatId, data.error === 'shadow' ? '🚫 Карма слишком низка — дуэли закрыты' : '❌ Не удалось создать дуэль');
+      } else {
+        await sendTg(chatId, `⚔️ Вызов отправлен @${uname}! У него 5 минут на ответ.`);
+      }
+      return res.status(200).json({ ok: true });
+    }
+
     const cmd = text.toLowerCase();
 
     // ===== /start =====
@@ -98,14 +259,32 @@ module.exports = async function handler(req, res) {
         `• Золота фокача з бонусами ✨\n` +
         `• Френзі x7 🔥\n` +
         `• Система престижу ♻️\n` +
-        `• 16 досягнень 🏆\n\n` +
+        `• Дуэли с другими игроками ⚔️\n\n` +
         `Натисни кнопку нижче і почни клікати! 👇`;
 
       await sendTg(TOKEN, 'sendMessage', {
         chat_id: chatId,
         text: welcome,
         reply_markup: {
-          inline_keyboard: [[{ text: '🫓 Грати у Фокача Клікер!', web_app: { url: WEBAPP_URL } }]],
+          inline_keyboard: [
+            [{ text: '🫓 Грати у Фокача Клікер!', web_app: { url: WEBAPP_URL } }],
+            [{ text: '⚔️ Дуэль', callback_data: 'duel:menu' }],
+          ],
+        },
+      });
+      return res.status(200).json({ ok: true });
+    }
+
+    // ===== /duel — меню дуэлей =====
+    if (cmd === '/duel' || cmd === 'дуель' || cmd === 'duel') {
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: '⚔️ Кого хочешь вызвать на дуэль?\nКто быстрее накликает 100 фокач — тот победил (+5💎)!',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '👥 Из списка игроков', callback_data: 'duel:players' }],
+            [{ text: '✍️ По юзернейму', callback_data: 'duel:byname' }],
+          ],
         },
       });
       return res.status(200).json({ ok: true });
