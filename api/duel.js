@@ -291,6 +291,11 @@ module.exports = async function handler(req, res) {
           // всё равно отмечаем присутствие (для resume)
           duel.lastSeen = duel.lastSeen || {};
           duel.lastSeen[userId] = now;
+          // оба игрока в мини-аппе → старт отсчёта 3-2-1
+          if (duel.stage === 'accepted' && duel.lastSeen[duel.p1.id] && duel.lastSeen[duel.p2.id]) {
+            duel.stage = 'countdown';
+            duel.startTs = now + COUNTDOWN_MS;
+          }
           if (duel.stage === 'paused') {
             const oppSeen = duel.lastSeen[opp.id] || 0;
             if (now - oppSeen < PAUSE_MS / 2) {
@@ -302,7 +307,7 @@ module.exports = async function handler(req, res) {
           }
         await saveDuel(duel);
         return res.status(200).json({
-          ok: true, v: 'v5.1.1', stage: duel.stage, me: { score: duel.scores?.[me.id] || 0 }, opp: { score: duel.scores?.[opp.id] || 0, missing: duel.missing === opp.id }, pausedLeft: duel.stage === 'paused' ? Math.max(0, PAUSE_MS - (now - (duel.pausedAt || now))) : 0,
+          ok: true, v: 'v5.1.1', stage: duel.stage, me: { score: duel.scores?.[me.id] || 0 }, opp: { score: duel.scores?.[opp.id] || 0, missing: duel.missing === opp.id }, startTs: duel.startTs || 0, serverNow: now, pausedLeft: duel.stage === 'paused' ? Math.max(0, PAUSE_MS - (now - (duel.pausedAt || now))) : 0,
         });
         }
 
