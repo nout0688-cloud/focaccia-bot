@@ -205,7 +205,10 @@ module.exports = async function handler(req, res) {
         return res.status(200).json({ ok: true });
       }
 
-      return res.status(400).json({ ok: false, error: 'unknown action' });
+      // sync обрабатывается общим игровым циклом ниже
+      if (action !== 'sync') {
+        return res.status(400).json({ ok: false, error: 'unknown action' });
+      }
     }
 
     // ===== GET/POST sync — игровой цикл (единый для обоих игроков) =====
