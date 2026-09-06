@@ -132,6 +132,29 @@ async function grantDiamonds(userId, amount) {
   await redis('SET', `reward_gem:${userId}`, String(cur + amount));
 }
 
+async function getUserBalance(userId, cur) {
+  const uid = String(userId);
+  const balData = await redis('HGET', 'user_balance', uid);
+  if (balData?.result) {
+    try {
+      const bObj = JSON.parse(balData.result);
+      const val = cur === 'gem' ? Number(bObj.d) : Number(bObj.f);
+      if (!isNaN(val)) return Math.max(0, val);
+    } catch { /* fallback */ }
+  }
+  // Fallback: перевіряємо leaderboard hash (якщо оновлений баланс ще не репортився)
+  const lbData = await redis('HGET', 'leaderboard', uid);
+  if (lbData?.result) {
+    try {
+      const lbObj = JSON.parse(lbData.result);
+      if (cur === 'foc' && typeof lbObj.t === 'number') {
+        return Math.max(0, lbObj.t);
+      }
+    } catch { /* fallback */ }
+  }
+  return null;
+}
+
 async function getDuel(duelId) {
   const raw = await redis('GET', `duel:${duelId}`);
   if (!raw?.result) return null;
@@ -224,10 +247,28 @@ module.exports = async function handler(req, res) {
   const now = Date.now();
 
   try {
+    // --- дізнатися баланс користувача (GET) ---
+    if (req.method === 'GET' && req.query.action === 'get_balance') {
+      const uId = String(req.query.userId || '');
+      if (!uId) return res.status(400).json({ ok: false, error: 'no userId' });
+      const f = (await getUserBalance(uId, 'foc')) || 0;
+      const d = (await getUserBalance(uId, 'gem')) || 0;
+      return res.status(200).json({ ok: true, focaccia: f, diamonds: d });
+    }
+
     // ===== POST — действия =====
     if (req.method === 'POST') {
       const body = req.body || {};
       const action = body.action;
+
+      // --- дізнатися баланс користувача (POST) ---
+      if (action === 'get_balance') {
+        const uId = String(body.userId || req.query.userId || '');
+        if (!uId) return res.status(400).json({ ok: false, error: 'no userId' });
+        const f = (await getUserBalance(uId, 'foc')) || 0;
+        const d = (await getUserBalance(uId, 'gem')) || 0;
+        return res.status(200).json({ ok: true, focaccia: f, diamonds: d });
+      }
 
       // --- создать вызов (со ставкой, целью и временем раунда) ---
       if (action === 'challenge') {
@@ -239,7 +280,7 @@ module.exports = async function handler(req, res) {
           return res.status(400).json({ ok: false, error: 'invalid players' });
         }
         const stakeCur = body.stakeCur === 'gem' ? 'gem' : 'foc';
-        const stake = Math.max(1, Math.min(Math.floor(Number(body.stake)) || 0, 1e15));
+        const stake = Math.max(1, Math.min(Math.floor(Number(body.stake)) || 0, 1e21));
         const goal = Math.max(GOAL_MIN, Math.min(Math.floor(Number(body.goal)) || GOAL_DEFAULT, GOAL_MAX));
         const timeMs = Math.max(60000, Math.min(Math.floor(Number(body.timeMs)) || 180000, DUEL_LIMIT));
         const kFrom = await getKarma(from);
@@ -250,27 +291,14 @@ module.exports = async function handler(req, res) {
 
         // Валідація балансу обох гравців перед створенням виклику
         if (stake > 0) {
-          const fromBalRaw = await redis('HGET', 'user_balance', from);
-          let fromBal = 0;
-          if (fromBalRaw?.result) {
-            try {
-              const b = JSON.parse(fromBalRaw.result);
-              fromBal = stakeCur === 'gem' ? (b.d || 0) : (b.f || 0);
-            } catch { fromBal = 0; }
-          }
-          if (fromBal < stake) {
+          const fromBal = await getUserBalance(from, stakeCur);
+          if (fromBal !== null && fromBal < stake) {
             return res.status(200).json({ ok: false, error: 'no_funds_creator' });
           }
 
-          const toBalRaw = await redis('HGET', 'user_balance', to);
-          let toBal = 0;
-          if (toBalRaw?.result) {
-            try {
-              const tb = JSON.parse(toBalRaw.result);
-              toBal = stakeCur === 'gem' ? (tb.d || 0) : (tb.f || 0);
-            } catch { toBal = 0; }
-          }
-          if (toBal < stake) {
+          const toBal = await getUserBalance(to, stakeCur);
+          // Блокуємо тільки якщо баланс суперника ТОЧНО відомий і менший за ставку
+          if (toBal !== null && toBal < stake) {
             return res.status(200).json({ ok: false, error: 'no_funds_opponent' });
           }
         }

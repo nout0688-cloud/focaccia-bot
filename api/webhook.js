@@ -97,6 +97,42 @@ async function sendDuelTg(token, method, body, delayMs = DUEL_MSG_CLEANUP_TTL) {
   return res;
 }
 
+function formatNum(n) {
+  if (!isFinite(n)) return '∞';
+  if (n < 1000) return Math.floor(n).toString();
+  const units = ['', 'K', 'M', 'B', 'T', 'Qa', 'Qi', 'Sx', 'Sp', 'Oc', 'No', 'Dc'];
+  let i = 0;
+  let v = n;
+  while (v >= 1000 && i < units.length - 1) {
+    v /= 1000;
+    i++;
+  }
+  if (v >= 1000) return n.toExponential(2).replace('e+', 'e');
+  return `${v.toFixed(v < 10 ? 2 : v < 100 ? 1 : 0)}${units[i]}`;
+}
+
+async function getUserBalance(userId, cur) {
+  const uid = String(userId);
+  const balData = await redis('HGET', 'user_balance', uid);
+  if (balData?.result) {
+    try {
+      const bObj = JSON.parse(balData.result);
+      const val = cur === 'gem' ? Number(bObj.d) : Number(bObj.f);
+      if (!isNaN(val)) return Math.max(0, val);
+    } catch { /* */ }
+  }
+  const lbData = await redis('HGET', 'leaderboard', uid);
+  if (lbData?.result) {
+    try {
+      const lbObj = JSON.parse(lbData.result);
+      if (cur === 'foc' && typeof lbObj.t === 'number') {
+        return Math.max(0, lbObj.t);
+      }
+    } catch { /* */ }
+  }
+  return null;
+}
+
 function isAdmin(userId) {
   return ADMIN_ID !== null && userId === ADMIN_ID;
 }
@@ -209,13 +245,16 @@ module.exports = async function handler(req, res) {
       // шаг 2: сумма ставки
       if (dAction === 'cur' && dArg && parts[3]) {
         const cur = parts[3];
-        const bets = cur === 'gem' ? [1, 5, 10, 25, 50, 100] : [10000, 100000, 1000000, 10000000, 100000000, 1000000000, 1000000000000, 100000000000000];
+        const bets = cur === 'gem'
+          ? [1, 5, 10, 25, 50, 100]
+          : [10000, 100000, 1000000, 10000000, 100000000, 1000000000, 1000000000000, 100000000000000, 1000000000000000, 10000000000000000, 1000000000000000000];
+        const sym = cur === 'gem' ? '💎' : '🫓';
         const rows = [];
         for (let i = 0; i < bets.length; i += 2) {
-          rows.push(bets.slice(i, i + 2).map((b) => ({ text: Number(b).toLocaleString('ru'), callback_data: `duel:stake:${dArg}:${cur}:${b}` })));
+          rows.push(bets.slice(i, i + 2).map((b) => ({ text: `${formatNum(b)} ${sym}`, callback_data: `duel:stake:${dArg}:${cur}:${b}` })));
         }
         rows.push([{ text: '❌ Отмена', callback_data: 'duel:cancel' }]);
-        await sendDuelTg(TOKEN, 'sendMessage', { chat_id: Number(cqChat), text: `💰 Размер ставки (${cur === 'gem' ? '💎' : '🫓'}):`, reply_markup: { inline_keyboard: rows } });
+        await sendDuelTg(TOKEN, 'sendMessage', { chat_id: Number(cqChat), text: `💰 Розмір ставки (${sym}):`, reply_markup: { inline_keyboard: rows } });
         return res.status(200).json({ ok: true });
       }
 
@@ -223,40 +262,26 @@ module.exports = async function handler(req, res) {
       if (dAction === 'stake' && parts[2] && parts[3] && parts[4]) {
         const targetId = parts[2];
         const cur = parts[3];
-        const stake = parseInt(parts[4]) || 0;
+        const stake = Number(parts[4]) || 0;
+        const sym = cur === 'gem' ? '💎' : '🫓';
 
         // Перевірка балансу творця дуелі
-        const balData = await redis('HGET', 'user_balance', String(cqChat));
-        let userBal = 0;
-        if (balData?.result) {
-          try {
-            const bObj = JSON.parse(balData.result);
-            userBal = cur === 'gem' ? (bObj.d || 0) : (bObj.f || 0);
-          } catch { userBal = 0; }
-        }
-        if (userBal < stake) {
-          const sym = cur === 'gem' ? '💎' : '🫓';
+        const userBal = await getUserBalance(cqChat, cur);
+        if (userBal !== null && userBal < stake) {
           await sendDuelTg(TOKEN, 'sendMessage', {
             chat_id: Number(cqChat),
-            text: `❌ У тебе недостатньо коштів для цієї ставки!\n💰 Твій баланс: ${userBal.toLocaleString('ru')} ${sym}\n⚔️ Потрібно: ${stake.toLocaleString('ru')} ${sym}\n\nЗайди в гру, щоб оновити баланс, або вибери меншу ставку!`,
+            text: `❌ У тебе недостатньо коштів для цієї ставки!\n💰 Твій баланс: ${formatNum(userBal)} ${sym}\n⚔️ Потрібно: ${formatNum(stake)} ${sym}\n\n💡 Зайди в гру, щоб оновити баланс, або вибери меншу ставку!`,
           });
           return res.status(200).json({ ok: true });
         }
 
         // Перевірка балансу обраного суперника
-        const oppBalData = await redis('HGET', 'user_balance', String(targetId));
-        let oppBal = 0;
-        if (oppBalData?.result) {
-          try {
-            const oObj = JSON.parse(oppBalData.result);
-            oppBal = cur === 'gem' ? (oObj.d || 0) : (oObj.f || 0);
-          } catch { oppBal = 0; }
-        }
-        if (oppBal < stake) {
-          const sym = cur === 'gem' ? '💎' : '🫓';
+        const oppBal = await getUserBalance(targetId, cur);
+        // Блокуємо тільки якщо баланс суперника ТОЧНО зафіксований і строго менший за ставку
+        if (oppBal !== null && oppBal < stake) {
           await sendDuelTg(TOKEN, 'sendMessage', {
             chat_id: Number(cqChat),
-            text: `❌ У суперника недостатньо коштів для такої ставки!\n💰 Його баланс: ${oppBal.toLocaleString('ru')} ${sym}\n⚔️ Обери меншу ставку для дуелі з цим гравцем!`,
+            text: `❌ У суперника недостатньо коштів для такої ставки!\n💰 Його баланс: ${formatNum(oppBal)} ${sym}\n⚔️ Обери меншу ставку для дуелі з цим гравцем!`,
           });
           return res.status(200).json({ ok: true });
         }
@@ -285,7 +310,7 @@ module.exports = async function handler(req, res) {
       if (dAction === 'time' && parts[2] && parts[3] && parts[4] && parts[5] && parts[6]) {
         const targetId = parts[2];
         const stakeCur = parts[3] === 'gem' ? 'gem' : 'foc';
-        const stake = parseInt(parts[4]) || 0;
+        const stake = Number(parts[4]) || 0;
         const goal = parseInt(parts[5]) || 100;
         const timeMs = parseInt(parts[6]) || 180000;
         if (String(targetId) === String(cqChat)) {
@@ -311,12 +336,15 @@ module.exports = async function handler(req, res) {
         });
         const data = await apiRes.json();
         if (!data.ok) {
-          const why = data.error === 'shadow' ? '🚫 Карма слишком низка — дуэли закрыты (Тінь бабусі)' : '❌ Не удалось создать дуэль';
+          let why = '❌ Не вдалося створити дуель';
+          if (data.error === 'shadow') why = '🚫 Карма занадто низька — дуелі закрито (Тінь бабусі)';
+          else if (data.error === 'no_funds_creator') why = '❌ У тебе недостатньо коштів на балансі для цієї ставки! Зайди в гру, щоб оновити баланс.';
+          else if (data.error === 'no_funds_opponent') why = '❌ У суперника недостатньо коштів для такої ставки!';
           await sendDuelTg(TOKEN, 'sendMessage', { chat_id: Number(cqChat), text: why });
           return res.status(200).json({ ok: true });
         }
         const sym = stakeCur === 'gem' ? '💎' : '🫓';
-        await sendDuelTg(TOKEN, 'sendMessage', { chat_id: Number(cqChat), text: `⚔️ Вызов отправлен ${tName}!\n💰 Ставка: ${stake.toLocaleString('ru')} ${sym} • 🎯 ${goal} тапов • ⏱ ${Math.round(timeMs / 60000)} мин\nУ него 5 минут на ответ.` });
+        await sendDuelTg(TOKEN, 'sendMessage', { chat_id: Number(cqChat), text: `⚔️ Вызов отправлен ${tName}!\n💰 Ставка: ${formatNum(stake)} ${sym} • 🎯 ${goal} тапов • ⏱ ${Math.round(timeMs / 60000)} мин\nУ него 5 минут на ответ.` });
         return res.status(200).json({ ok: true });
       }
 
