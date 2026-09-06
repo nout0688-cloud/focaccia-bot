@@ -78,8 +78,18 @@ module.exports = async function handler(req, res) {
       const dAction = parts[1];
       const dArg = parts[2];
 
-      // меню выбора соперника
-      if (dAction === 'menu') {
+      // временная отладка: показываем, что пришла кнопка
+      try {
+        await fetch(`https://api.telegram.org/bot${TOKEN}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: Number(cqChat), text: `🐞 debug: кнопка «${dAction}» ${dArg || ''}` }),
+        });
+      } catch { /* ignore */ }
+
+      try {
+        // меню выбора соперника
+        if (dAction === 'menu') {
         await sendTg(cqChat, '⚔️ Кого хочешь вызвать на дуэль?\nКто быстрее накликает 100 фокач — тот победил (+5💎)!', {
           reply_markup: {
             inline_keyboard: [
@@ -187,6 +197,10 @@ module.exports = async function handler(req, res) {
       }
 
       return res.status(200).json({ ok: true });
+      } catch (e) {
+        try { await sendTg(cqChat, `🐞 Ошибка дуэли: ${e.message}`); } catch { /* */ }
+        return res.status(200).json({ ok: true });
+      }
     }
 
     const msg = update.message;
