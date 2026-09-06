@@ -132,6 +132,12 @@ module.exports = async function handler(req, res) {
         }
       }
 
+      // отсчёт закончился → бой начался
+      if (duel.stage === 'countdown' && duel.startTs && now >= duel.startTs) {
+        duel.stage = 'live';
+        await saveDuel(duel);
+      }
+
       // живая дуэль: пауза/нокаут/лимит времени
       if (duel.stage === 'live' || duel.stage === 'paused') {
         duel.lastSeen = duel.lastSeen || {};
@@ -275,6 +281,11 @@ module.exports = async function handler(req, res) {
 
       // --- sync: пакет тапов + снапшот (основной цикл игры) ---
       if (action === 'sync') {
+        // отсчёт закончился → бой начался
+        if (duel.stage === 'countdown' && duel.startTs && now >= duel.startTs) {
+          duel.stage = 'live';
+          await saveDuel(duel);
+        }
         if (duel.stage !== 'live') {
           // всё равно отмечаем присутствие (для resume)
           duel.lastSeen = duel.lastSeen || {};
