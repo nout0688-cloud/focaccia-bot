@@ -69,11 +69,15 @@ module.exports = async function handler(req, res) {
     const rbData = await redis('GET', `rebirth:${userId}`);
     const rebirths = rbData?.result ? parseInt(rbData.result) : 0;
 
-    if (amount > 0 || rebirths > 0) {
+    const gemData = await redis('GET', `reward_gem:${userId}`);
+    const diamonds = gemData?.result ? parseInt(gemData.result) : 0;
+
+    if (amount > 0 || rebirths > 0 || diamonds > 0) {
       // Clear pending grants after claiming
       if (amount > 0) await redis('DEL', `reward:${userId}`);
       if (rebirths > 0) await redis('DEL', `rebirth:${userId}`);
-      return res.status(200).json({ ok: true, reward: amount, rebirth: rebirths, karma });
+      if (diamonds > 0) await redis('DEL', `reward_gem:${userId}`);
+      return res.status(200).json({ ok: true, reward: amount, rebirth: rebirths, diamonds, karma });
     }
 
     return res.status(200).json({ ok: true, reward: 0, karma });

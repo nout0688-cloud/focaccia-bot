@@ -64,11 +64,11 @@ async function setKarma(userId, karma) {
   await redis('HSET', 'ac_karma', String(userId), JSON.stringify({ k: karma, on: 0, ts: Date.now() }));
 }
 
-// награда победителю через существующий reward-механизм (забирается в основной игре)
-async function grantReward(userId, amount) {
-  const raw = await redis('GET', `reward:${userId}`);
+// награда победителю через существующий reward-механизм (алмазы забираются в основной игре)
+async function grantDiamonds(userId, amount) {
+  const raw = await redis('GET', `reward_gem:${userId}`);
   const cur = raw?.result ? parseInt(raw.result, 10) : 0;
-  await redis('SET', `reward:${userId}`, String(cur + amount));
+  await redis('SET', `reward_gem:${userId}`, String(cur + amount));
 }
 
 async function getDuel(duelId) {
@@ -92,18 +92,21 @@ async function finishDuel(duel, winner, reason) {
   duel.reason = reason;
   await saveDuel(duel);
 
+  const sym = duel.stakeCur === 'gem' ? '💎' : '🫓';
+  const totalPot = (duel.stake || 0) * 2;
   const draw = winner === 'draw';
+
   if (!draw) {
-    await grantReward(winner, 5);
+    await grantDiamonds(winner, 5);
     const loser = winner === duel.p1.id ? duel.p2.id : duel.p1.id;
     const winText =
-      reason === 'cheat' ? '🏆 Соперник возможно использовал стороннее ПО — победа за тобой!' :
-      reason === 'forfeit' ? '🏆 Соперник покинул дуэль — победа за тобой!' :
-      '🏆 Ты первым выполнил цель! +5💎 (забери в основной игре)';
+      reason === 'cheat' ? `🏆 Перемога! Суперник використав стороннє ПЗ.\n💰 Твій виграш: ${totalPot.toLocaleString('ru')} ${sym}!\n🎁 Бонус: +5 💎` :
+      reason === 'forfeit' ? `🏆 Перемога! Суперник покинув дуель.\n💰 Твій виграш: ${totalPot.toLocaleString('ru')} ${sym}!\n🎁 Бонус: +5 💎` :
+      `🏆 ПЕРЕМОГА В ДУЕЛІ!\n💰 Твій виграш: ${totalPot.toLocaleString('ru')} ${sym} (банк дуелі)!\n🎁 Бонус: +5 💎 (забери в грі)`;
     const loseText =
-      reason === 'cheat' ? '🚫 Обнаружено стороннее ПО — поражение. −10 кармы.' :
-      reason === 'forfeit' ? '🏃 Соперник покинул дуэль — поражение.' :
-      '💔 Соперник был быстрее.';
+      reason === 'cheat' ? '🚫 Виявлено стороннє ПЗ — поразка. −10 карми.' :
+      reason === 'forfeit' ? `🏃 Поразка — ти покинув дуель.\n💸 Втрачено: ${(duel.stake || 0).toLocaleString('ru')} ${sym}` :
+      `💔 Суперник наклікав швидше.\n💸 Втрачено: ${(duel.stake || 0).toLocaleString('ru')} ${sym}`;
     await sendTg(winner, winText);
     await sendTg(loser, loseText);
     if (reason === 'cheat') {
@@ -111,10 +114,10 @@ async function finishDuel(duel, winner, reason) {
       await setKarma(loser, Math.max(0, k - 10));
     }
   } else {
-    await grantReward(duel.p1.id, 2);
-    await grantReward(duel.p2.id, 2);
-    await sendTg(duel.p1.id, '🤝 Время вышло — ничья! +2💎 обоим');
-    await sendTg(duel.p2.id, '🤝 Время вышло — ничья! +2💎 обоим');
+    await grantDiamonds(duel.p1.id, 2);
+    await grantDiamonds(duel.p2.id, 2);
+    await sendTg(duel.p1.id, `🤝 Час вийшов — нічия!\n💰 Ставка ${(duel.stake || 0).toLocaleString('ru')} ${sym} повернута.\n🎁 Бонус: +2 💎 обом`);
+    await sendTg(duel.p2.id, `🤝 Час вийшов — нічия!\n💰 Ставка ${(duel.stake || 0).toLocaleString('ru')} ${sym} повернута.\n🎁 Бонус: +2 💎 обом`);
   }
   return { winner, reason };
 }
@@ -371,6 +374,10 @@ module.exports = async function handler(req, res) {
         pot += val;
         if (escrowRaw.result[i] === userId) myPaid = val;
       }
+    }
+    if (pot <= 0 && duel.stake) {
+      pot = duel.stake * 2;
+      myPaid = duel.stake;
     }
 
     return res.status(200).json({
