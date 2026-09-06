@@ -146,6 +146,14 @@ async function saveDuel(duel) {
 // результат пишется ОДИН раз (SETNX): первый достигший цели — победитель навсегда.
 // Ставка-банк: escrow обоих игроков уходит победителю (выдаётся в дуэльном мини-аппе и на сервере).
 async function finishDuel(duel, winner, reason) {
+  if (!winner || winner === 'none' || reason === 'no_funds' || duel.stage === 'cancelled') {
+    duel.stage = 'cancelled';
+    duel.winner = null;
+    duel.reason = reason || 'cancelled';
+    await saveDuel(duel);
+    return null;
+  }
+
   const set = await redis('SET', `duel_result:${duel.id}`, JSON.stringify({ winner, reason, ts: Date.now() }), 'NX');
   if (!set?.result) return null; // уже зафиксировано другим финишем
   duel.stage = 'finished';
@@ -154,24 +162,26 @@ async function finishDuel(duel, winner, reason) {
   await saveDuel(duel);
 
   const sym = duel.stakeCur === 'gem' ? '💎' : '🫓';
-  const totalPot = (duel.stake || 0) * 2;
+  // Якщо бій не розпочався (forfeit до старту гри) — банк НЕ подвоюється, а лише повертається своя ставка!
+  const isPreGameForfeit = reason === 'forfeit' && (!duel.startTs || duel.stage !== 'live');
+  const totalPot = isPreGameForfeit ? (duel.stake || 0) : ((duel.stake || 0) * 2);
   const draw = winner === 'draw';
 
   if (!draw) {
     if (duel.stakeCur === 'gem') {
-      await grantDiamonds(winner, totalPot + 5);
+      await grantDiamonds(winner, totalPot + (isPreGameForfeit ? 0 : 5));
     } else {
       if (totalPot > 0) await grantFocaccia(winner, totalPot);
-      await grantDiamonds(winner, 5);
+      if (!isPreGameForfeit) await grantDiamonds(winner, 5);
     }
     const loser = winner === duel.p1.id ? duel.p2.id : duel.p1.id;
     const winText =
       reason === 'cheat' ? `🏆 Перемога! Суперник використав стороннє ПЗ.\n💰 Твій виграш: ${totalPot.toLocaleString('ru')} ${sym}!\n🎁 Бонус: +5 💎` :
-      reason === 'forfeit' ? `🏆 Перемога! Суперник покинув дуель або не мав коштів.\n💰 Твій виграш: ${totalPot.toLocaleString('ru')} ${sym}!\n🎁 Бонус: +5 💎` :
+      reason === 'forfeit' ? (isPreGameForfeit ? `ℹ️ Суперник не увійшов у дуель.\n💰 Твою ставку ${totalPot.toLocaleString('ru')} ${sym} повернуто.` : `🏆 Перемога! Суперник покинув дуель під час бою.\n💰 Твій виграш: ${totalPot.toLocaleString('ru')} ${sym}!\n🎁 Бонус: +5 💎`) :
       `🏆 ПЕРЕМОГА В ДУЕЛІ!\n💰 Твій виграш: ${totalPot.toLocaleString('ru')} ${sym} (банк дуелі)!\n🎁 Бонус: +5 💎 (забери в грі)`;
     const loseText =
       reason === 'cheat' ? '🚫 Виявлено стороннє ПЗ — поразка. −10 карми.' :
-      reason === 'forfeit' ? `🏃 Поразка — ти покинув дуель або не мав ставки.\n💸 Втрачено: ${(duel.stake || 0).toLocaleString('ru')} ${sym}` :
+      reason === 'forfeit' ? `🏃 Поразка — ти покинув дуель.\n💸 Втрачено: ${(duel.stake || 0).toLocaleString('ru')} ${sym}` :
       `💔 Суперник наклікав швидше.\n💸 Втрачено: ${(duel.stake || 0).toLocaleString('ru')} ${sym}`;
     await sendTg(winner, winText);
     await sendTg(loser, loseText);
@@ -237,6 +247,34 @@ module.exports = async function handler(req, res) {
         if (kFrom < KARMA_MIN || kTo < KARMA_MIN) {
           return res.status(200).json({ ok: false, error: 'shadow', karma: Math.min(kFrom, kTo) });
         }
+
+        // Валідація балансу обох гравців перед створенням виклику
+        if (stake > 0) {
+          const fromBalRaw = await redis('HGET', 'user_balance', from);
+          let fromBal = 0;
+          if (fromBalRaw?.result) {
+            try {
+              const b = JSON.parse(fromBalRaw.result);
+              fromBal = stakeCur === 'gem' ? (b.d || 0) : (b.f || 0);
+            } catch { fromBal = 0; }
+          }
+          if (fromBal < stake) {
+            return res.status(200).json({ ok: false, error: 'no_funds_creator' });
+          }
+
+          const toBalRaw = await redis('HGET', 'user_balance', to);
+          let toBal = 0;
+          if (toBalRaw?.result) {
+            try {
+              const tb = JSON.parse(toBalRaw.result);
+              toBal = stakeCur === 'gem' ? (tb.d || 0) : (tb.f || 0);
+            } catch { toBal = 0; }
+          }
+          if (toBal < stake) {
+            return res.status(200).json({ ok: false, error: 'no_funds_opponent' });
+          }
+        }
+
         const duelId = `d${now.toString(36)}${Math.floor(Math.random() * 1296).toString(36)}`;
         const duel = {
           id: duelId,
@@ -313,13 +351,33 @@ module.exports = async function handler(req, res) {
         return res.status(200).json({ ok: true });
       }
 
-      // --- недостаточно средств на ставку ---
+      // --- недостаточно средств на ставку: дуэль СКАСОВУЄТЬСЯ, банк НЕ видається нікому ---
       if (action === 'no_funds') {
-        const fin = await finishDuel(duel, opp.id, 'forfeit');
+        duel.stage = 'cancelled';
+        duel.reason = 'no_funds';
+        duel.winner = null;
+        await saveDuel(duel);
+        await redis('SET', `duel_result:${duel.id}`, JSON.stringify({ winner: null, reason: 'no_funds', ts: now }), 'NX');
+
         const sym = duel.stakeCur === 'gem' ? '💎' : '🫓';
-        await sendTg(userId, `❌ У тебе недостатньо коштів для ставки (${(duel.stake || 0).toLocaleString('ru')} ${sym}) — зараховано технічну поразку.`);
-        await sendTg(opp.id, `🏆 Суперник не мав достатньо коштів для ставки — перемога за тобою!`);
-        return res.status(200).json({ ok: true, stage: 'finished', winner: opp.id, reason: 'forfeit' });
+
+        // Якщо у суперника (opp) вже було списано ставку на сервері (escrow) — повертаємо ВИКЛЮЧНО його ставку
+        const oppPaidRaw = await redis('HGET', `duel_escrow:${duelId}`, opp.id);
+        const oppPaid = oppPaidRaw?.result ? parseInt(oppPaidRaw.result, 10) : 0;
+        if (oppPaid > 0) {
+          if (duel.stakeCur === 'gem') {
+            await grantDiamonds(opp.id, oppPaid);
+          } else {
+            await grantFocaccia(opp.id, oppPaid);
+          }
+          await redis('HDEL', `duel_escrow:${duelId}`, opp.id);
+        }
+        await redis('DEL', `duel_escrow:${duelId}`);
+
+        await sendDuelTg(userId, `❌ У тебе недостатньо коштів для ставки (${(duel.stake || 0).toLocaleString('ru')} ${sym}) — дуель скасовано. Банк не виплачується.`);
+        await sendDuelTg(opp.id, `❌ Дуель скасовано: у суперника недостатньо коштів для ставки (${(duel.stake || 0).toLocaleString('ru')} ${sym}). Якщо вашу ставку було списано — її повернуто.`);
+
+        return res.status(200).json({ ok: true, stage: 'cancelled', winner: null, reason: 'no_funds' });
       }
 
       if (action && action !== 'sync') {

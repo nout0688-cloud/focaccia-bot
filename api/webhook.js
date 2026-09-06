@@ -227,19 +227,38 @@ module.exports = async function handler(req, res) {
 
         // Перевірка балансу творця дуелі
         const balData = await redis('HGET', 'user_balance', String(cqChat));
+        let userBal = 0;
         if (balData?.result) {
           try {
             const bObj = JSON.parse(balData.result);
-            const userBal = cur === 'gem' ? (bObj.d || 0) : (bObj.f || 0);
-            if (userBal < stake) {
-              const sym = cur === 'gem' ? '💎' : '🫓';
-              await sendDuelTg(TOKEN, 'sendMessage', {
-                chat_id: Number(cqChat),
-                text: `❌ У тебе недостатньо коштів для цієї ставки!\n💰 Твій баланс: ${userBal.toLocaleString('ru')} ${sym}\n⚔️ Потрібно: ${stake.toLocaleString('ru')} ${sym}\n\nЗайди в гру або вибери меншу ставку!`,
-              });
-              return res.status(200).json({ ok: true });
-            }
-          } catch { /* */ }
+            userBal = cur === 'gem' ? (bObj.d || 0) : (bObj.f || 0);
+          } catch { userBal = 0; }
+        }
+        if (userBal < stake) {
+          const sym = cur === 'gem' ? '💎' : '🫓';
+          await sendDuelTg(TOKEN, 'sendMessage', {
+            chat_id: Number(cqChat),
+            text: `❌ У тебе недостатньо коштів для цієї ставки!\n💰 Твій баланс: ${userBal.toLocaleString('ru')} ${sym}\n⚔️ Потрібно: ${stake.toLocaleString('ru')} ${sym}\n\nЗайди в гру, щоб оновити баланс, або вибери меншу ставку!`,
+          });
+          return res.status(200).json({ ok: true });
+        }
+
+        // Перевірка балансу обраного суперника
+        const oppBalData = await redis('HGET', 'user_balance', String(targetId));
+        let oppBal = 0;
+        if (oppBalData?.result) {
+          try {
+            const oObj = JSON.parse(oppBalData.result);
+            oppBal = cur === 'gem' ? (oObj.d || 0) : (oObj.f || 0);
+          } catch { oppBal = 0; }
+        }
+        if (oppBal < stake) {
+          const sym = cur === 'gem' ? '💎' : '🫓';
+          await sendDuelTg(TOKEN, 'sendMessage', {
+            chat_id: Number(cqChat),
+            text: `❌ У суперника недостатньо коштів для такої ставки!\n💰 Його баланс: ${oppBal.toLocaleString('ru')} ${sym}\n⚔️ Обери меншу ставку для дуелі з цим гравцем!`,
+          });
+          return res.status(200).json({ ok: true });
         }
 
         const goals = [100, 250, 500, 1000];
@@ -473,6 +492,8 @@ module.exports = async function handler(req, res) {
           `• \`/rebirth <кількість>\` — видати собі ребіртхи\n` +
           `• \`/rebirthto <username> <кількість>\` — видати комусь ребіртхи\n` +
           `• \`/check <username>\` — інфо про юзера\n` +
+          `• \`/clearreward <username>\` — очистити очікувану нагороду\n` +
+          `• \`/takefrom <username> <кількість>\` — списати фокачі при вході\n` +
           `• \`/lb_clear\` — очистити лідерборд\n` +
           `• \`/reports\` — звіт античиту (хто детектило)\n` +
           `• \`/warn <username>\` — видати знак ⚠️ вручну\n` +
@@ -724,6 +745,56 @@ module.exports = async function handler(req, res) {
       else info += `🛡 Карма: ${karma}/100 — Clear\n`;
 
       await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: info, parse_mode: 'Markdown' });
+      return res.status(200).json({ ok: true });
+    }
+
+    // /clearreward <username> — clear pending rewards
+    if (cmd.startsWith('/clearreward ') || cmd.startsWith('clearreward ')) {
+      const targetUsername = text.replace(/^\/?clearreward\s+/i, '').replace('@', '').toLowerCase().trim();
+      const targetData = await redis('HGET', 'usernames', targetUsername);
+      if (!targetData?.result) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: `❌ @${targetUsername} не знайдений` });
+        return res.status(200).json({ ok: true });
+      }
+      const targetChatId = targetData.result;
+      await redis('DEL', `reward:${targetChatId}`);
+      await redis('DEL', `reward_gem:${targetChatId}`);
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: `✅ Очікувані нагороди для @${targetUsername} повністю очищено!`,
+      });
+      return res.status(200).json({ ok: true });
+    }
+
+    // /takefrom <username> <amount> — deduct focaccia on next game entry
+    if (cmd.startsWith('/takefrom ') || cmd.startsWith('takefrom ')) {
+      const raw = text.replace(/^\/?takefrom\s+/i, '').trim();
+      const parts = raw.split(/\s+/);
+      if (parts.length < 2) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Формат: /takefrom <username> <кількість>' });
+        return res.status(200).json({ ok: true });
+      }
+      const targetUsername = parts[0].replace('@', '').toLowerCase();
+      const amount = parseInt(parts[1]);
+      if (!amount || amount <= 0) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Вкажи правильну кількість' });
+        return res.status(200).json({ ok: true });
+      }
+      const targetData = await redis('HGET', 'usernames', targetUsername);
+      if (!targetData?.result) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: `❌ @${targetUsername} не знайдений` });
+        return res.status(200).json({ ok: true });
+      }
+      const targetChatId = targetData.result;
+      await redis('DEL', `reward:${targetChatId}`);
+      const exDeduct = await redis('GET', `deduct:${targetChatId}`);
+      const curD = exDeduct?.result ? parseInt(exDeduct.result) : 0;
+      await redis('SET', `deduct:${targetChatId}`, String(curD + amount));
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: `✅ Встановлено списання *${amount.toLocaleString()}* фокач для @${targetUsername} при наступному вході в гру (та очищено очікувані нагороди).`,
+        parse_mode: 'Markdown',
+      });
       return res.status(200).json({ ok: true });
     }
 
