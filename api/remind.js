@@ -36,6 +36,30 @@ module.exports = async function handler(req, res) {
   if (!TOKEN) return res.status(500).json({ error: 'BOT_TOKEN not set' });
 
   try {
+    // 🧹 Очищення застарілих повідомлень дуелей (>15 хв)
+    try {
+      const now = Date.now();
+      const exp = await redis('ZRANGEBYSCORE', 'duel_msg_cleanup', '0', String(now));
+      if (exp?.result && Array.isArray(exp.result) && exp.result.length > 0) {
+        await Promise.allSettled(
+          exp.result.map(async (item) => {
+            const sep = item.indexOf(':');
+            if (sep === -1) return;
+            const cId = item.slice(0, sep);
+            const mId = item.slice(sep + 1);
+            if (cId && mId) {
+              await fetch(`https://api.telegram.org/bot${TOKEN}/deleteMessage`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ chat_id: Number(cId), message_id: Number(mId) }),
+              }).catch(() => {});
+            }
+          })
+        );
+        await redis('ZREMRANGEBYSCORE', 'duel_msg_cleanup', '0', String(now));
+      }
+    } catch { /* ignore */ }
+
     // Отримуємо всіх юзерів
     const data = await redis('HGETALL', 'users');
     if (!data?.result || data.result.length === 0) {

@@ -44,14 +44,67 @@ async function redis(...args) {
 }
 
 async function sendTg(chatId, text, extra = {}) {
-  if (!BOT_TOKEN) return;
+  if (!BOT_TOKEN) return null;
   try {
-    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+    const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chat_id: Number(chatId), text, ...extra }),
     });
-  } catch { /* ignore */ }
+    return res.json();
+  } catch {
+    return null;
+  }
+}
+
+const DUEL_MSG_CLEANUP_TTL = 15 * 60 * 1000; // 15 хвилин
+
+async function scheduleMessageDeletion(chatId, messageId, delayMs = DUEL_MSG_CLEANUP_TTL) {
+  if (!chatId || !messageId) return;
+  try {
+    const expireAt = Date.now() + delayMs;
+    await redis('ZADD', 'duel_msg_cleanup', String(expireAt), `${chatId}:${messageId}`);
+  } catch (e) {
+    console.error('scheduleMessageDeletion error:', e);
+  }
+}
+
+async function cleanupExpiredMessages(botToken) {
+  const token = botToken || BOT_TOKEN;
+  if (!token) return;
+  try {
+    const now = Date.now();
+    const raw = await redis('ZRANGEBYSCORE', 'duel_msg_cleanup', '0', String(now));
+    if (raw?.result && Array.isArray(raw.result) && raw.result.length > 0) {
+      const items = raw.result;
+      await Promise.allSettled(
+        items.map(async (item) => {
+          const sep = item.indexOf(':');
+          if (sep === -1) return;
+          const cId = item.slice(0, sep);
+          const mId = item.slice(sep + 1);
+          if (cId && mId) {
+            await fetch(`https://api.telegram.org/bot${token}/deleteMessage`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ chat_id: Number(cId), message_id: Number(mId) }),
+            }).catch(() => {});
+          }
+        })
+      );
+      await redis('ZREMRANGEBYSCORE', 'duel_msg_cleanup', '0', String(now));
+    }
+  } catch (err) {
+    console.error('cleanupExpiredMessages error:', err);
+  }
+}
+
+async function sendDuelTg(chatId, text, extra = {}, delayMs = DUEL_MSG_CLEANUP_TTL) {
+  const res = await sendTg(chatId, text, extra);
+  if (res?.result?.message_id) {
+    await scheduleMessageDeletion(chatId, res.result.message_id, delayMs);
+  }
+  return res;
 }
 
 async function getKarma(userId) {
@@ -155,6 +208,9 @@ module.exports = async function handler(req, res) {
 
   if (!process.env.KV_REST_API_URL) return res.status(200).json({ ok: false, error: 'no kv' });
 
+  // 🧹 Автоматичне видалення застарілих повідомлень налаштування дуелей (>15 хв)
+  await cleanupExpiredMessages(BOT_TOKEN);
+
   const now = Date.now();
 
   try {
@@ -192,7 +248,7 @@ module.exports = async function handler(req, res) {
         };
         await saveDuel(duel);
         const sym = stakeCur === 'gem' ? '💎' : '🫓';
-        await sendTg(to, `⚔️ Тебя вызвали на дуэль! (${fromName})\n💰 Ставка: ${stake.toLocaleString('ru')} ${sym}\n🎯 Цель: ${goal.toLocaleString('ru')} тапов\n⏱ Раунд: ${Math.round(timeMs / 60000)} мин\n\nУ тебя спишут ставку сразу после старта. 5 минут на ответ.`, {
+        await sendDuelTg(to, `⚔️ Тебя вызвали на дуэль! (${fromName})\n💰 Ставка: ${stake.toLocaleString('ru')} ${sym}\n🎯 Цель: ${goal.toLocaleString('ru')} тапов\n⏱ Раунд: ${Math.round(timeMs / 60000)} мин\n\nУ тебя спишут ставку сразу после старта. 5 минут на ответ.`, {
           reply_markup: {
             inline_keyboard: [
               [
@@ -222,7 +278,7 @@ module.exports = async function handler(req, res) {
           duel.stage = 'cancelled';
           duel.reason = 'timeout';
           await saveDuel(duel);
-          await sendTg(duel.p1.id, '⏱ Соперник не ответил за 5 минут — дуэль отменена.');
+          await sendDuelTg(duel.p1.id, '⏱ Соперник не ответил за 5 минут — дуэль отменена.');
           return res.status(200).json({ ok: false, error: 'expired' });
         }
         duel.p2.name = String(body.name || duel.p2.name || 'Гравець').replace(/\uFFFD/g, '').trim().slice(0, 24) || 'Гравець';
@@ -233,8 +289,8 @@ module.exports = async function handler(req, res) {
         const url = `${DUEL_SITE}${duelId}`;
         const sym = duel.stakeCur === 'gem' ? '💎' : '🫓';
         const kb = { inline_keyboard: [[{ text: '🎮 Войти в дуэль', web_app: { url } }]] };
-        await sendTg(duel.p1.id, `⚔️ ${me.name} принял вызов!\n💰 Банк: ${(duel.stake * 2).toLocaleString('ru')} ${sym}`, { reply_markup: kb });
-        await sendTg(duel.p2.id, `⚔️ Войди в дуэль. Банк: ${(duel.stake * 2).toLocaleString('ru')} ${sym}`, { reply_markup: kb });
+        await sendDuelTg(duel.p1.id, `⚔️ ${me.name} принял вызов!\n💰 Банк: ${(duel.stake * 2).toLocaleString('ru')} ${sym}`, { reply_markup: kb });
+        await sendDuelTg(duel.p2.id, `⚔️ Войди в дуэль. Банк: ${(duel.stake * 2).toLocaleString('ru')} ${sym}`, { reply_markup: kb });
         return res.status(200).json({ ok: true, url });
       }
 
@@ -244,7 +300,7 @@ module.exports = async function handler(req, res) {
         duel.stage = 'cancelled';
         duel.reason = 'declined';
         await saveDuel(duel);
-        await sendTg(duel.p1.id, `❌ ${me.name || 'Соперник'} отклонил вызов.`);
+        await sendDuelTg(duel.p1.id, `❌ ${me.name || 'Соперник'} отклонил вызов.`);
         return res.status(200).json({ ok: true });
       }
 
@@ -294,7 +350,7 @@ module.exports = async function handler(req, res) {
       duel.stage = 'cancelled';
       duel.reason = 'timeout';
       await saveDuel(duel);
-      await sendTg(duel.p1.id, '⏱ Соперник не ответил за 5 минут — дуэль отменена.');
+      await sendDuelTg(duel.p1.id, '⏱ Соперник не ответил за 5 минут — дуэль отменена.');
       return res.status(200).json({ ok: false, error: 'expired', stage: 'cancelled' });
     }
 
