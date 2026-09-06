@@ -394,6 +394,7 @@ module.exports = async function handler(req, res) {
       await redis('DEL', 'ac_total');
       await redis('DEL', 'ac_active');
       await redis('DEL', 'ac_karma');
+      await redis('DEL', 'ac_strikes');
       await sendTg(TOKEN, 'sendMessage', {
         chat_id: chatId,
         text: '✅ Лідерборд, карма та лічильники античиту очищено! Гравці повернуться туди протягом хвилини гри.',
@@ -516,6 +517,7 @@ module.exports = async function handler(req, res) {
       await redis('HSET', 'ac_karma', targetChatId, JSON.stringify({ k: 100, on: 0, ts: Date.now() }));
       await redis('HDEL', 'ac_active', targetChatId);
       await redis('HDEL', 'ac_total', targetChatId);
+      await redis('HDEL', 'ac_strikes', targetChatId);
       await sendTg(TOKEN, 'sendMessage', {
         chat_id: chatId,
         text: `✅ *@${targetUsername}* повністю прощений: карма відновлена до *100/100*, знак ⚠️ та всі обмеження знято.`,

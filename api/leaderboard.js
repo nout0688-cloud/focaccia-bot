@@ -75,25 +75,42 @@ module.exports = async function handler(req, res) {
         return res.status(400).json({ ok: false, error: 'invalid userId' });
       }
 
-      // Події античиту
+      // Події античиту — мʼяка лестниця карми:
+      // challenge запущено: 0 (перший), −10 якщо підтвердження ≤ 30 хв, −15 якщо ≥ 6 страйків/24ч
+      // challenge провалено: −5. challenge пройдено: 0.
       if (body.event === 'flag') {
-        const { k } = await getKarma(userId);
-        const karma = Math.max(0, k - 15); // детект бʼє по кармі
-        await setKarma(userId, karma, 0);
+        const now = Date.now();
+        let strikes = [];
+        const sRaw = await redis('HGET', 'ac_strikes', userId);
+        if (sRaw?.result) {
+          try { strikes = JSON.parse(sRaw.result); } catch { strikes = []; }
+        }
+        const prevStrike = strikes.length ? strikes[strikes.length - 1] : 0;
+        strikes.push(now);
+        if (strikes.length > 20) strikes = strikes.slice(-20);
+        await redis('HSET', 'ac_strikes', userId, JSON.stringify(strikes));
         await redis('HINCRBY', 'ac_total', userId, '1');
-        await redis('HSET', 'ac_active', userId, '1');
+
+        const recent24 = strikes.filter((ts) => now - ts < 24 * 3600000).length;
+        const { k } = await getKarma(userId);
+        let karma = k;
+        if (recent24 >= 6) karma = Math.max(0, karma - 15);       // стійкий порушник
+        else if (prevStrike && now - prevStrike < 30 * 60000) karma = Math.max(0, karma - 10); // повторне підтвердження
+        await setKarma(userId, karma, 0);
+        if (karma < 50) await redis('HSET', 'ac_active', userId, '1');
+        else await redis('HDEL', 'ac_active', userId);
+        return res.status(200).json({ ok: true, karma });
+      }
+      if (body.event === 'fail') {
+        const { k } = await getKarma(userId);
+        const karma = Math.max(0, k - 5); // не прошів challenge
+        await setKarma(userId, karma, 0);
         return res.status(200).json({ ok: true, karma });
       }
       if (body.event === 'clear') {
         const { k } = await getKarma(userId);
-        if (k < 25) {
-          // «Тінь бабусі» — випробування не діє
-          return res.status(200).json({ ok: false, reason: 'shadow', karma: k });
-        }
-        const karma = Math.min(75, k + 10);
-        await setKarma(userId, karma, 0);
-        if (karma >= 25) await redis('HDEL', 'ac_active', userId);
-        return res.status(200).json({ ok: true, karma });
+        await redis('HDEL', 'ac_active', userId); // підозру знято, карма не міняється
+        return res.status(200).json({ ok: true, karma: k });
       }
 
       const total = Math.max(0, Math.min(Number(body.total) || 0, 1e24));
