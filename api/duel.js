@@ -244,7 +244,7 @@ module.exports = async function handler(req, res) {
       const seen2 = await redis('HGET', `duel_seen:${duelId}`, duel.p2.id);
       if (seen1?.result && seen2?.result) {
         duel.stage = 'countdown';
-        duel.startTs = now + 3000;
+        duel.startTs = now + 7000; // 4с интро (VS) + 3с отсчёт
         await saveDuel(duel);
       } else if (duel.acceptedAt && now - duel.acceptedAt > ACCEPT_TTL) {
         // соперник так и не вошёл — техническое поражение
