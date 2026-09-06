@@ -376,15 +376,13 @@ module.exports = async function handler(req, res) {
       if (pendingRb?.result && parseInt(pendingRb.result) > 0) {
         info += `🔄 Очікується ребіртхів: ${parseInt(pendingRb.result)}\n`;
       }
-      const acActive = await redis('HGET', 'ac_active', targetChatId);
-      const acTotal = await redis('HGET', 'ac_total', targetChatId);
-      if (acActive?.result) {
-        info += `⚠️ Античит: підозра АКТИВНА (знак у топі)\n`;
-      } else if (acTotal?.result && parseInt(acTotal.result) > 0) {
-        info += `🛡 Античит: детектів у минулому — ${parseInt(acTotal.result)}, зараз чистий\n`;
-      } else {
-        info += `🛡 Античит: Clear\n`;
-      }
+      const kRaw = await redis('HGET', 'ac_karma', targetChatId);
+      let karma = 100;
+      if (kRaw?.result) { try { karma = Math.max(0, Math.min(100, JSON.parse(kRaw.result).k || 0)); } catch { /* */ } }
+      if (karma < 25) info += `🔴 Карма: ${karma}/100 — *Тінь бабусі* (топ заморожено)\n`;
+      else if (karma < 50) info += `⚠️ Карма: ${karma}/100 — казино закрите, ⚠️ у топі\n`;
+      else if (karma < 75) info += `🟡 Карма: ${karma}/100 — ставки в казино до 1K\n`;
+      else info += `🛡 Карма: ${karma}/100 — Clear\n`;
 
       await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: info, parse_mode: 'Markdown' });
       return res.status(200).json({ ok: true });
@@ -424,6 +422,14 @@ module.exports = async function handler(req, res) {
         for (let i = 0; i < active.result.length; i += 2) activeIds.add(active.result[i]);
       }
 
+      const karmaData = await redis('HGETALL', 'ac_karma');
+      const karmaMap = {};
+      if (karmaData?.result) {
+        for (let i = 0; i < karmaData.result.length; i += 2) {
+          try { karmaMap[karmaData.result[i]] = Math.max(0, Math.min(100, JSON.parse(karmaData.result[i + 1]).k || 0)); } catch { /* */ }
+        }
+      }
+
       const flagged = [];
       if (totals?.result) {
         for (let i = 0; i < totals.result.length; i += 2) {
@@ -440,7 +446,9 @@ module.exports = async function handler(req, res) {
         flagged.slice(0, 20).forEach((f, i) => {
           const who = names[f.id] || `\`${f.id}\``;
           const liveMark = activeIds.has(f.id) ? ' 🔴' : '';
-          msg += `${i + 1}. ${who} — *${f.c}* раз(ів)${liveMark}\n`;
+          const km = karmaMap[f.id] ?? 100;
+          const zone = km < 25 ? '🔴' : km < 50 ? '⚠️' : km < 75 ? '🟡' : '🟢';
+          msg += `${i + 1}. ${who} — *${f.c}* раз(ів), карма *${km}/100* ${zone}${liveMark}\n`;
         });
         if (flagged.length > 20) msg += `…і ще ${flagged.length - 20}\n`;
       }
@@ -464,7 +472,7 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: true });
     }
 
-    // /warn <username> — вручну видати знак ⚠️
+    // /warn <username> — вручну видати знак ⚠️ і знизити карму
     if (cmd.startsWith('/warn ') || cmd.startsWith('warn ')) {
       const targetUsername = text.replace(/^\/?warn\s+/i, '').replace('@', '').toLowerCase().trim();
       if (!targetUsername) {
@@ -478,17 +486,23 @@ module.exports = async function handler(req, res) {
       }
 
       const targetChatId = targetData.result;
+      // карма −15
+      let karma = 100;
+      const kRaw = await redis('HGET', 'ac_karma', targetChatId);
+      if (kRaw?.result) { try { karma = Math.max(0, Math.min(100, JSON.parse(kRaw.result).k || 0)); } catch { /* */ } }
+      karma = Math.max(0, karma - 15);
+      await redis('HSET', 'ac_karma', targetChatId, JSON.stringify({ k: karma, on: 0, ts: Date.now() }));
       await redis('HINCRBY', 'ac_total', targetChatId, '1');
-      await redis('HSET', 'ac_active', targetChatId, '1');
+      if (karma < 50) await redis('HSET', 'ac_active', targetChatId, '1');
       await sendTg(TOKEN, 'sendMessage', {
         chat_id: chatId,
-        text: `⚠️ Знак видано *@${targetUsername}*. У лідерборді біля його ніка буде попередження, у /reports — плюс один детект.\nЗняти: \`/unflag @${targetUsername}\``,
+        text: `⚠️ Знак видано *@${targetUsername}*. Карма: *${karma}/100*.\nЗняти всі обмеження: \`/unflag @${targetUsername}\``,
         parse_mode: 'Markdown',
       });
       return res.status(200).json({ ok: true });
     }
 
-    // /unflag <username> — зняти знак ⚠️ і обнулити детекти
+    // /unflag <username> — повне відновлення: карма 100, без знаків і детектів
     if (cmd.startsWith('/unflag ') || cmd.startsWith('unflag ')) {
       const targetUsername = text.replace(/^\/?unflag\s+/i, '').replace('@', '').toLowerCase().trim();
       const targetData = await redis('HGET', 'usernames', targetUsername);
@@ -498,9 +512,14 @@ module.exports = async function handler(req, res) {
       }
 
       const targetChatId = targetData.result;
+      await redis('HSET', 'ac_karma', targetChatId, JSON.stringify({ k: 100, on: 0, ts: Date.now() }));
       await redis('HDEL', 'ac_active', targetChatId);
       await redis('HDEL', 'ac_total', targetChatId);
-      await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: `✅ Знак ⚠️ знято з @${targetUsername}, детекти обнулено.` });
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: `✅ *@${targetUsername}* повністю прощений: карма відновлена до *100/100*, знак ⚠️ та всі обмеження знято.`,
+        parse_mode: 'Markdown',
+      });
       return res.status(200).json({ ok: true });
     }
 

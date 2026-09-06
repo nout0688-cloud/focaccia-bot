@@ -32,6 +32,13 @@ module.exports = async function handler(req, res) {
   }
 
   try {
+    // Карма акаунта (античит)
+    let karma = 100;
+    const kRaw = await redis('HGET', 'ac_karma', String(userId));
+    if (kRaw?.result) {
+      try { karma = Math.max(0, Math.min(100, JSON.parse(kRaw.result).k || 0)); } catch { /* */ }
+    }
+
     // Check global reset time
     const globalResetData = await redis('GET', 'global_reset_time');
     const globalResetTime = globalResetData?.result ? parseInt(globalResetData.result) : 0;
@@ -47,7 +54,13 @@ module.exports = async function handler(req, res) {
         ok: true,
         reset: true,
         resetTime: Math.max(globalResetTime, Date.now()),
+        karma,
       });
+    }
+
+    // Карма < 25 — «Тінь бабусі»: нагороди від адміна не видаються (тримаються до прощення)
+    if (karma < 25) {
+      return res.status(200).json({ ok: true, reward: 0, karma });
     }
 
     const data = await redis('GET', `reward:${userId}`);
@@ -60,10 +73,10 @@ module.exports = async function handler(req, res) {
       // Clear pending grants after claiming
       if (amount > 0) await redis('DEL', `reward:${userId}`);
       if (rebirths > 0) await redis('DEL', `rebirth:${userId}`);
-      return res.status(200).json({ ok: true, reward: amount, rebirth: rebirths });
+      return res.status(200).json({ ok: true, reward: amount, rebirth: rebirths, karma });
     }
 
-    return res.status(200).json({ ok: true, reward: 0 });
+    return res.status(200).json({ ok: true, reward: 0, karma });
   } catch (err) {
     console.error('Reward error:', err);
     return res.status(200).json({ ok: true, reward: 0 });

@@ -6,6 +6,22 @@
 
 const FRESH_MS = 30 * 24 * 60 * 60 * 1000; // гравців, які не заходили 30 днів, не показуємо
 const ONLINE_MS = 3 * 60 * 1000; // репорт кожні 60с — онлайн якщо свіжий ≤ 3 хв
+const HOUR_MS = 60 * 60 * 1000;
+
+// Карма 0–100: детект −15, випробування +10 (макс 75), +1 за годину онлайн-гри.
+// Карма < 25 → «Тінь бабусі»: лідерборд заморожено.
+async function getKarma(userId) {
+  const raw = await redis('HGET', 'ac_karma', userId);
+  if (!raw?.result) return { k: 100, on: 0 };
+  try {
+    const d = JSON.parse(raw.result);
+    return { k: Math.max(0, Math.min(100, parseInt(d.k) || 0)), on: parseInt(d.on) || 0 };
+  } catch { return { k: 100, on: 0 }; }
+}
+
+async function setKarma(userId, karma, onlineMs) {
+  await redis('HSET', 'ac_karma', userId, JSON.stringify({ k: karma, on: onlineMs, ts: Date.now() }));
+}
 
 async function redis(...args) {
   const url = process.env.KV_REST_API_URL;
@@ -59,15 +75,25 @@ module.exports = async function handler(req, res) {
         return res.status(400).json({ ok: false, error: 'invalid userId' });
       }
 
-      // Події античиту: flag — детект, clear — пройдено випробування
+      // Події античиту
       if (body.event === 'flag') {
+        const { k } = await getKarma(userId);
+        const karma = Math.max(0, k - 15); // детект бʼє по кармі
+        await setKarma(userId, karma, 0);
         await redis('HINCRBY', 'ac_total', userId, '1');
         await redis('HSET', 'ac_active', userId, '1');
-        return res.status(200).json({ ok: true });
+        return res.status(200).json({ ok: true, karma });
       }
       if (body.event === 'clear') {
-        await redis('HDEL', 'ac_active', userId);
-        return res.status(200).json({ ok: true });
+        const { k } = await getKarma(userId);
+        if (k < 25) {
+          // «Тінь бабусі» — випробування не діє
+          return res.status(200).json({ ok: false, reason: 'shadow', karma: k });
+        }
+        const karma = Math.min(75, k + 10);
+        await setKarma(userId, karma, 0);
+        if (karma >= 25) await redis('HDEL', 'ac_active', userId);
+        return res.status(200).json({ ok: true, karma });
       }
 
       const total = Math.max(0, Math.min(Number(body.total) || 0, 1e24));
@@ -79,41 +105,56 @@ module.exports = async function handler(req, res) {
         .slice(0, 24) || 'Гравець';
       const username = String(body.username || '').replace(/[^a-zA-Z0-9_]/g, '').slice(0, 32);
 
-      // Античит: порівнюємо дельту кліків з попереднього репорту.
-      // Рука людини не дає стабільно > 400 кл/мин (6.7/с) цілодобово.
+      const now = Date.now();
       const prevRaw = await redis('HGET', 'leaderboard', userId);
+      let prev = null;
       if (prevRaw?.result) {
-        try {
-          const prev = JSON.parse(prevRaw.result);
-          if (typeof prev.k === 'number' && prev.ts) {
-            const dClicks = clicks - prev.k;
-            const dMin = (Date.now() - prev.ts) / 60000;
-            if (dClicks > 0 && dMin > 0 && dClicks / dMin > 400) {
-              await redis('HINCRBY', 'ac_total', userId, '1');
-              await redis('HSET', 'ac_active', userId, '1');
-            }
-          }
-        } catch { /* skip corrupted */ }
+        try { prev = JSON.parse(prevRaw.result); } catch { /* skip corrupted */ }
       }
 
-      await redis('HSET', 'leaderboard', userId, JSON.stringify({ n: name, u: username, t: total, p: prestige, k: clicks, ts: Date.now() }));
+      // Карма: +1 за годину онлайн-гри (рахуємо час між репортами, максимум 2 хв за раз)
+      const cur = await getKarma(userId);
+      let karma = cur.k;
+      let onlineMs = cur.on + Math.min(now - (prev?.ts || now), 120000);
+      while (onlineMs >= HOUR_MS && karma < 100) { karma = Math.min(100, karma + 1); onlineMs -= HOUR_MS; }
+
+      // Античит: порівнюємо дельту кліків з попереднього репорту.
+      // Рука людини не дає стабільно > 400 кл/мин (6.7/с) цілодобово.
+      if (prev && typeof prev.k === 'number' && prev.ts) {
+        const dClicks = clicks - prev.k;
+        const dMin = (now - prev.ts) / 60000;
+        if (dClicks > 0 && dMin > 0 && dClicks / dMin > 400) {
+          karma = Math.max(0, karma - 15);
+          await redis('HINCRBY', 'ac_total', userId, '1');
+          await redis('HSET', 'ac_active', userId, '1');
+        }
+      }
+      await setKarma(userId, karma, onlineMs);
+
+      // Карма < 25 — «Тінь бабусі»: прогрес у лідерборді заморожено
+      const frozen = karma < 25 && prev && typeof prev.t === 'number';
+      const storedTotal = frozen ? prev.t : total;
+
+      await redis('HSET', 'leaderboard', userId, JSON.stringify({ n: name, u: username, t: storedTotal, p: prestige, k: clicks, ts: now }));
 
       // Рахуємо місце гравця одразу після оновлення
       const rank = parsePlayers(await redis('HGETALL', 'leaderboard')).findIndex((p) => p.id === userId) + 1;
 
-      return res.status(200).json({ ok: true, rank: rank > 0 ? rank : null });
+      return res.status(200).json({ ok: true, rank: rank > 0 ? rank : null, karma, frozen });
     }
 
     // ===== GET — топ гравців (з позначками ⚠️) =====
-    const activeData = await redis('HGETALL', 'ac_active');
-    const activeSet = new Set();
+    const activeData = await redis('HGETALL', 'ac_karma');
+    const karmaMap = new Map();
     if (activeData?.result) {
-      for (let i = 0; i < activeData.result.length; i += 2) activeSet.add(activeData.result[i]);
+      for (let i = 0; i < activeData.result.length; i += 2) {
+        try { karmaMap.set(activeData.result[i], JSON.parse(activeData.result[i + 1]).k || 0); } catch { /* */ }
+      }
     }
 
     const players = parsePlayers(await redis('HGETALL', 'leaderboard'))
       .slice(0, 50)
-      .map((p) => ({ ...p, flag: activeSet.has(p.id) }));
+      .map((p) => ({ ...p, flag: (karmaMap.get(p.id) ?? 100) < 50 }));
     return res.status(200).json({ ok: true, players });
   } catch (err) {
     console.error('Leaderboard error:', err);
