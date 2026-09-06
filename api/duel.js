@@ -256,7 +256,7 @@ module.exports = async function handler(req, res) {
         duel.stage = 'accepted';
         duel.acceptedAt = now;
         await saveDuel(duel);
-        const url = `${DUEL_SITE}?duel=${duelId}`;
+        const url = `${DUEL_SITE}${duelId}`;
         const kb = { inline_keyboard: [[{ text: '🎮 Войти в дуэль', web_app: { url } }]] };
         await sendTg(duel.p1.id, `⚔️ ${me.name} принял вызов! Войди в дуэль.`, { reply_markup: kb });
         await sendTg(duel.p2.id, '⚔️ Войди в дуэль. Кто быстрее накликает 100 фокач!', { reply_markup: kb });
