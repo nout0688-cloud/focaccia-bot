@@ -393,9 +393,10 @@ module.exports = async function handler(req, res) {
       await redis('DEL', 'leaderboard');
       await redis('DEL', 'ac_total');
       await redis('DEL', 'ac_active');
+      await redis('DEL', 'ac_karma');
       await sendTg(TOKEN, 'sendMessage', {
         chat_id: chatId,
-        text: '✅ Лідерборд і лічильники античиту очищено! Гравці повернуться туди протягом хвилини гри.',
+        text: '✅ Лідерборд, карма та лічильники античиту очищено! Гравці повернуться туди протягом хвилини гри.',
       });
       return res.status(200).json({ ok: true });
     }
