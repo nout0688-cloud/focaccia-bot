@@ -113,12 +113,13 @@ function formatNum(n) {
 
 async function getUserBalance(userId, cur) {
   const uid = String(userId);
+  let bal = null;
   const balData = await redis('HGET', 'user_balance', uid);
   if (balData?.result) {
     try {
       const bObj = JSON.parse(balData.result);
       const val = cur === 'gem' ? Number(bObj.d) : Number(bObj.f);
-      if (!isNaN(val)) return Math.max(0, val);
+      if (!isNaN(val) && val > 0) bal = val;
     } catch { /* */ }
   }
   const lbData = await redis('HGET', 'leaderboard', uid);
@@ -126,11 +127,11 @@ async function getUserBalance(userId, cur) {
     try {
       const lbObj = JSON.parse(lbData.result);
       if (cur === 'foc' && typeof lbObj.t === 'number') {
-        return Math.max(0, lbObj.t);
+        bal = Math.max(bal || 0, lbObj.t);
       }
     } catch { /* */ }
   }
-  return null;
+  return bal;
 }
 
 function isAdmin(userId) {

@@ -151,11 +151,27 @@ module.exports = async function handler(req, res) {
       // Карма < 25 — «Тінь бабусі»: прогрес у лідерборді заморожено
       const frozen = karma < 25 && prev && typeof prev.t === 'number';
       const storedTotal = frozen ? prev.t : total;
-
       await redis('HSET', 'leaderboard', userId, JSON.stringify({ n: name, u: username, t: storedTotal, p: prestige, k: clicks, ts: now }));
-      const focaccia = Math.max(0, Math.floor(Number(body.focaccia)) || 0);
-      const diamonds = Math.max(0, Math.floor(Number(body.diamonds)) || 0);
-      await redis('HSET', 'user_balance', userId, JSON.stringify({ f: focaccia, d: diamonds, ts: now }));
+
+      const rawFoc = body.focaccia !== undefined && body.focaccia !== null ? Math.max(0, Math.min(Number(body.focaccia) || 0, 1e24)) : null;
+      const rawDia = body.diamonds !== undefined && body.diamonds !== null ? Math.max(0, Math.min(Number(body.diamonds) || 0, 1e9)) : null;
+
+      // Оновлюємо user_balance тільки якщо поля передані
+      if (rawFoc !== null || rawDia !== null) {
+        let prevFoc = 0;
+        let prevDia = 0;
+        const prevBal = await redis('HGET', 'user_balance', userId);
+        if (prevBal?.result) {
+          try {
+            const pb = JSON.parse(prevBal.result);
+            prevFoc = Number(pb.f) || 0;
+            prevDia = Number(pb.d) || 0;
+          } catch { /* */ }
+        }
+        const finalFoc = rawFoc !== null ? rawFoc : prevFoc;
+        const finalDia = rawDia !== null ? rawDia : prevDia;
+        await redis('HSET', 'user_balance', userId, JSON.stringify({ f: finalFoc, d: finalDia, ts: now }));
+      }
 
       // Рахуємо місце гравця одразу після оновлення
       const rank = parsePlayers(await redis('HGETALL', 'leaderboard')).findIndex((p) => p.id === userId) + 1;

@@ -134,25 +134,26 @@ async function grantDiamonds(userId, amount) {
 
 async function getUserBalance(userId, cur) {
   const uid = String(userId);
+  let bal = null;
   const balData = await redis('HGET', 'user_balance', uid);
   if (balData?.result) {
     try {
       const bObj = JSON.parse(balData.result);
       const val = cur === 'gem' ? Number(bObj.d) : Number(bObj.f);
-      if (!isNaN(val)) return Math.max(0, val);
+      if (!isNaN(val) && val > 0) bal = val;
     } catch { /* fallback */ }
   }
-  // Fallback: перевіряємо leaderboard hash (якщо оновлений баланс ще не репортився)
+  // Fallback: перевіряємо leaderboard hash (якщо баланс фокач ще не репортився або 0)
   const lbData = await redis('HGET', 'leaderboard', uid);
   if (lbData?.result) {
     try {
       const lbObj = JSON.parse(lbData.result);
       if (cur === 'foc' && typeof lbObj.t === 'number') {
-        return Math.max(0, lbObj.t);
+        bal = Math.max(bal || 0, lbObj.t);
       }
     } catch { /* fallback */ }
   }
-  return null;
+  return bal;
 }
 
 async function getDuel(duelId) {
