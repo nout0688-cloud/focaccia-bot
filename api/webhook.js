@@ -165,7 +165,7 @@ module.exports = async function handler(req, res) {
         const apiRes = await fetch(`https://${host}/api/duel`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'accept', duelId: dArg, userId: cqChat }),
+          body: JSON.stringify({ action: 'accept', duelId: dArg, userId: cqChat, name: cq.from?.first_name || '' }),
         });
         const data = await apiRes.json();
         if (!data.ok) {

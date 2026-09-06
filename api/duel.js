@@ -184,7 +184,7 @@ module.exports = async function handler(req, res) {
           await sendTg(duel.p1.id, '⏱ Соперник не ответил за 5 минут — дуэль отменена.');
           return res.status(200).json({ ok: false, error: 'expired' });
         }
-        duel.p2.name = duel.p2.name || opp.name || 'Гравець';
+        duel.p2.name = String(body.name || duel.p2.name || 'Гравець').replace(/\uFFFD/g, '').trim().slice(0, 24) || 'Гравець';
         duel.stage = 'accepted';
         duel.acceptedAt = now;
         await saveDuel(duel);
