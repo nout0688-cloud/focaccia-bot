@@ -29,7 +29,7 @@ const ACCEPT_TTL = 5 * 60 * 1000;   // время войти в мини-апп
 const FRESH_MS = 30 * 24 * 3600 * 1000;
 const KARMA_MIN = 25;               // ниже — «Тінь бабусі», дуэли закрыты
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const DUEL_SITE = 'https://nout0688-cloud.github.io/focaccia-clicker/?duel=';
+const DUEL_SITE = 'https://nout0688-cloud.github.io/focaccia-clicker/?v=1.1.4&duel=';
 
 async function redis(...args) {
   const url = process.env.KV_REST_API_URL;
