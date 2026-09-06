@@ -182,6 +182,7 @@ module.exports = async function handler(req, res) {
       const oppScore = duel.scores?.[opp.id] || 0;
       return res.status(200).json({
         ok: true,
+        v: 'v5.1.1',
         stage: duel.stage,
         me: { id: me.id, name: me.name, score: myScore },
         opp: { id: opp.id, name: opp.name, score: oppScore, missing: duel.missing === opp.id },
@@ -299,8 +300,10 @@ module.exports = async function handler(req, res) {
               delete duel.pausedAt;
             }
           }
-          await saveDuel(duel);
-          return res.status(200).json({ ok: true, stage: duel.stage, me: { score: duel.scores?.[me.id] || 0 }, opp: { score: duel.scores?.[opp.id] || 0, missing: duel.missing === opp.id }, pausedLeft: duel.stage === 'paused' ? Math.max(0, PAUSE_MS - (now - (duel.pausedAt || now))) : 0 });
+        await saveDuel(duel);
+        return res.status(200).json({
+          ok: true, v: 'v5.1.1', stage: duel.stage, me: { score: duel.scores?.[me.id] || 0 }, opp: { score: duel.scores?.[opp.id] || 0, missing: duel.missing === opp.id }, pausedLeft: duel.stage === 'paused' ? Math.max(0, PAUSE_MS - (now - (duel.pausedAt || now))) : 0,
+        });
         }
 
         const delta = Math.max(0, Math.min(Math.floor(Number(body.delta)) || 0, 200));
