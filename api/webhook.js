@@ -139,15 +139,22 @@ module.exports = async function handler(req, res) {
         }
         let tName = 'Гравець';
         let myName = 'Гравець';
+        let myU = '';
         try { const u = JSON.parse(tData.result); tName = u.username ? `@${u.username}` : u.name; } catch { /* */ }
         const myData = await redis('HGET', 'users', String(cqChat));
-        if (myData?.result) { try { myName = JSON.parse(myData.result).name || myName; } catch { /* */ } }
+        if (myData?.result) {
+          try {
+            const u = JSON.parse(myData.result);
+            myName = u.name || myName;
+            myU = u.username || '';
+          } catch { /* */ }
+        }
 
         const host = req.headers.host || 'focaccia-bot.vercel.app';
         const apiRes = await fetch(`https://${host}/api/duel`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'challenge', from: cqChat, fromName: myName, to: dArg }),
+          body: JSON.stringify({ action: 'challenge', from: cqChat, fromName: myName, fromU: myU, to: dArg }),
         });
         const data = await apiRes.json();
         if (!data.ok) {
@@ -165,7 +172,7 @@ module.exports = async function handler(req, res) {
         const apiRes = await fetch(`https://${host}/api/duel`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'accept', duelId: dArg, userId: cqChat, name: cq.from?.first_name || '' }),
+          body: JSON.stringify({ action: 'accept', duelId: dArg, userId: cqChat, name: cq.from?.first_name || '', u: cq.from?.username || '' }),
         });
         const data = await apiRes.json();
         if (!data.ok) {
@@ -234,12 +241,19 @@ module.exports = async function handler(req, res) {
       }
       const host = req.headers.host || 'focaccia-bot.vercel.app';
       let myName = 'Гравець';
+      let myU = '';
       const myRaw = await redis('HGET', 'users', String(chatId));
-      if (myRaw?.result) { try { myName = JSON.parse(myRaw.result).name || myName; } catch { /* */ } }
+      if (myRaw?.result) {
+        try {
+          const u = JSON.parse(myRaw.result);
+          myName = u.name || myName;
+          myU = u.username || '';
+        } catch { /* */ }
+      }
       const apiRes = await fetch(`https://${host}/api/duel`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'challenge', from: chatId, fromName: myName, to: tId.result }),
+        body: JSON.stringify({ action: 'challenge', from: chatId, fromName: myName, fromU: myU, to: tId.result }),
       });
       const data = await apiRes.json();
       if (!data.ok) {

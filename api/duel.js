@@ -134,6 +134,7 @@ module.exports = async function handler(req, res) {
         const from = String(body.from || '');
         const to = String(body.to || '');
         const fromName = String(body.fromName || 'Гравець').replace(/\uFFFD/g, '').trim().slice(0, 24) || 'Гравець';
+        const fromU = String(body.fromU || '').replace(/[^a-zA-Z0-9_]/g, '').slice(0, 32);
         if (!/^\d{1,20}$/.test(from) || !/^\d{1,20}$/.test(to) || from === to) {
           return res.status(400).json({ ok: false, error: 'invalid players' });
         }
@@ -146,8 +147,8 @@ module.exports = async function handler(req, res) {
         const duel = {
           id: duelId,
           stage: 'challenge',
-          p1: { id: from, name: fromName },
-          p2: { id: to, name: '' },
+          p1: { id: from, name: fromName, u: fromU },
+          p2: { id: to, name: '', u: '' },
           createdAt: now, expiresAt: now + DUEL_TTL,
         };
         await saveDuel(duel);
@@ -185,6 +186,7 @@ module.exports = async function handler(req, res) {
           return res.status(200).json({ ok: false, error: 'expired' });
         }
         duel.p2.name = String(body.name || duel.p2.name || 'Гравець').replace(/\uFFFD/g, '').trim().slice(0, 24) || 'Гравець';
+        duel.p2.u = String(body.u || duel.p2.u || '').replace(/[^a-zA-Z0-9_]/g, '').slice(0, 32);
         duel.stage = 'accepted';
         duel.acceptedAt = now;
         await saveDuel(duel);
@@ -348,8 +350,8 @@ module.exports = async function handler(req, res) {
     return res.status(200).json({
       ok: true, v: 'v5.1.1',
       stage: duel.stage,
-      me: { id: me.id, name: me.name, score: myScore },
-      opp: { id: opp.id, name: opp.name, score: oppScore, missing: oppMissing },
+      me: { id: me.id, name: me.name, u: me.u || '', score: myScore },
+      opp: { id: opp.id, name: opp.name, u: opp.u || '', score: oppScore, missing: oppMissing },
       goal: GOAL,
       startTs: duel.startTs || 0,
       elapsed: duel.startTs ? Math.max(0, now - duel.startTs) : 0,
