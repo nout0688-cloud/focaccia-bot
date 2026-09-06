@@ -441,7 +441,7 @@ module.exports = async function handler(req, res) {
         flagged.sort((a, b) => b.c - a.c);
       }
 
-      let msg = '🛡 *АНТИЧИТ ЗВІТ*\n\n⚠️ *ДЕТЕКТИЛО:*\n';
+      let msg = '🛡 *TAPSENTINEL v5 — ЗВІТ*\n\n⚠️ *ДЕТЕКТИЛО:*\n';
       if (flagged.length === 0) {
         msg += 'поки нікого — усі чисті 👼\n';
       } else {
