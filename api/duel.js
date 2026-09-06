@@ -1,20 +1,25 @@
 /**
- * TapSentinel Duels v2 — атомарные комнаты дуэлей.
- * Кто быстрее накликает 100 фокач. Сервер — источник истины, гонок чтение-запись нет.
+ * TapSentinel Duels v3 — дуэли со ставками (эскроу на сервере).
+ *
+ * Флоу: вызов (валюта+ставка+цель+время) → принятие → оба в мини-аппе →
+ * ставка списывается у обоих → отсчёт → бой (кто быстрее наберёт goal) → финиш.
  *
  * Ключи:
- *   duel:{id}        — метаданные матча (игроки, стадия, тайминги)
- *   duel_scores:{id} — hash: userId → счёт (HINCRBY, атомарно)
- *   duel_seen:{id}   — hash: userId → lastSeen (HSET, атомарно)
- *   duel_result:{id} — результат (SETNX — пишется ОДИН раз, первый достигший 100 побеждает)
- *   duel_lasttap:{id}— hash: userId → ts последнего тап-репорта
+ *   duel:{id}         — метаданные матча (игроки, ставка, стадия)
+ *   duel_scores:{id}  — hash: userId → тапы (HINCRBY, атомарно)
+ *   duel_seen:{id}    — hash: userId → lastSeen
+ *   duel_result:{id}  — результат (SETNX — пишется один раз)
+ *   duel_escrow:{id}  — hash: userId → ставка, внесённая при старте
+ *   duel_lasttap:{id} — hash: userId → ts последнего тап-репорта
+ *   duel_viol:{id}    — hash: userId → страйки темпа
  *
- * Стадии: challenge (TTL 5м) → accepted → countdown (3с) → live
- *         → paused (соперник вышел, 30с → нокаут) → finished | cancelled
- * Финиш: 100 тапов | время 15 мин (ничья) | выход > 30с | 3 страйка темпа (чит)
+ * Финиш: goal тапов | 15 мин (ничья) | выход > 30с (нокаут) | 3 страйка (чит).
+ * Ставка (эскроу) уходит победителю — игроки получают её в дуэльном мини-аппе.
  */
 
-const GOAL = 100;
+const GOAL_DEFAULT = 100;
+const GOAL_MIN = 10;
+const GOAL_MAX = 100000;
 const MAX_RATE = 15;                // тапов/с — физический предел
 const RATE_VIOLATIONS = 3;          // страйков темпа → чит-финиш
 const PAUSE_MS = 30 * 1000;         // выход соперника → пауза → нокаут
@@ -77,7 +82,8 @@ async function saveDuel(duel) {
   await redis('SET', `duel:${duel.id}`, JSON.stringify(duel), 'EX', ttl);
 }
 
-// результат пишется ОДИН раз (SETNX): первый достигший цели — победитель навсегда
+// результат пишется ОДИН раз (SETNX): первый достигший цели — победитель навсегда.
+// Ставка-банк: escrow обоих игроков уходит победителю (выдаётся в дуэльном мини-аппе).
 async function finishDuel(duel, winner, reason) {
   const set = await redis('SET', `duel_result:${duel.id}`, JSON.stringify({ winner, reason, ts: Date.now() }), 'NX');
   if (!set?.result) return null; // уже зафиксировано другим финишем
@@ -93,12 +99,12 @@ async function finishDuel(duel, winner, reason) {
     const winText =
       reason === 'cheat' ? '🏆 Соперник возможно использовал стороннее ПО — победа за тобой!' :
       reason === 'forfeit' ? '🏆 Соперник покинул дуэль — победа за тобой!' :
-      '🏆 Ты первым накликал 100 фокач! +5💎';
+      '🏆 Ты первым выполнил цель! +5💎 (забери в основной игре)';
     const loseText =
       reason === 'cheat' ? '🚫 Обнаружено стороннее ПО — поражение. −10 кармы.' :
       reason === 'forfeit' ? '🏃 Соперник покинул дуэль — поражение.' :
       '💔 Соперник был быстрее.';
-    await sendTg(winner, winText + ' +5💎 (забери в основной игре)');
+    await sendTg(winner, winText);
     await sendTg(loser, loseText);
     if (reason === 'cheat') {
       const k = await getKarma(loser);
@@ -129,7 +135,7 @@ module.exports = async function handler(req, res) {
       const body = req.body || {};
       const action = body.action;
 
-      // --- создать вызов ---
+      // --- создать вызов (со ставкой, целью и временем раунда) ---
       if (action === 'challenge') {
         const from = String(body.from || '');
         const to = String(body.to || '');
@@ -138,6 +144,10 @@ module.exports = async function handler(req, res) {
         if (!/^\d{1,20}$/.test(from) || !/^\d{1,20}$/.test(to) || from === to) {
           return res.status(400).json({ ok: false, error: 'invalid players' });
         }
+        const stakeCur = body.stakeCur === 'gem' ? 'gem' : 'foc';
+        const stake = Math.max(1, Math.min(Math.floor(Number(body.stake)) || 0, 1e15));
+        const goal = Math.max(GOAL_MIN, Math.min(Math.floor(Number(body.goal)) || GOAL_DEFAULT, GOAL_MAX));
+        const timeMs = Math.max(60000, Math.min(Math.floor(Number(body.timeMs)) || 180000, DUEL_LIMIT));
         const kFrom = await getKarma(from);
         const kTo = await getKarma(to);
         if (kFrom < KARMA_MIN || kTo < KARMA_MIN) {
@@ -149,10 +159,12 @@ module.exports = async function handler(req, res) {
           stage: 'challenge',
           p1: { id: from, name: fromName, u: fromU },
           p2: { id: to, name: '', u: '' },
+          stakeCur, stake, goal, timeMs,
           createdAt: now, expiresAt: now + DUEL_TTL,
         };
         await saveDuel(duel);
-        await sendTg(to, `⚔️ Тебя вызвали на дуэль! (${fromName})\n⏱ 5 минут на ответ.`, {
+        const sym = stakeCur === 'gem' ? '💎' : '🫓';
+        await sendTg(to, `⚔️ Тебя вызвали на дуэль! (${fromName})\n💰 Ставка: ${stake.toLocaleString('ru')} ${sym}\n🎯 Цель: ${goal.toLocaleString('ru')} тапов\n⏱ Раунд: ${Math.round(timeMs / 60000)} мин\n\nУ тебя спишут ставку сразу после старта. 5 минут на ответ.`, {
           reply_markup: {
             inline_keyboard: [
               [
@@ -191,9 +203,10 @@ module.exports = async function handler(req, res) {
         duel.acceptedAt = now;
         await saveDuel(duel);
         const url = `${DUEL_SITE}${duelId}`;
+        const sym = duel.stakeCur === 'gem' ? '💎' : '🫓';
         const kb = { inline_keyboard: [[{ text: '🎮 Войти в дуэль', web_app: { url } }]] };
-        await sendTg(duel.p1.id, `⚔️ ${me.name} принял вызов! Войди в дуэль.`, { reply_markup: kb });
-        await sendTg(duel.p2.id, '⚔️ Войди в дуэль. Кто быстрее накликает 100 фокач!', { reply_markup: kb });
+        await sendTg(duel.p1.id, `⚔️ ${me.name} принял вызов!\n💰 Банк: ${(duel.stake * 2).toLocaleString('ru')} ${sym}`, { reply_markup: kb });
+        await sendTg(duel.p2.id, `⚔️ Войди в дуэль. Банк: ${(duel.stake * 2).toLocaleString('ru')} ${sym}`, { reply_markup: kb });
         return res.status(200).json({ ok: true, url });
       }
 
@@ -207,10 +220,7 @@ module.exports = async function handler(req, res) {
         return res.status(200).json({ ok: true });
       }
 
-      // sync обрабатывается общим игровым циклом ниже
-      if (action !== 'sync') {
-        return res.status(400).json({ ok: false, error: 'unknown action' });
-      }
+      return res.status(400).json({ ok: false, error: 'unknown action' });
     }
 
     // ===== GET/POST sync — игровой цикл (единый для обоих игроков) =====
@@ -246,7 +256,7 @@ module.exports = async function handler(req, res) {
       const seen2 = await redis('HGET', `duel_seen:${duelId}`, duel.p2.id);
       if (seen1?.result && seen2?.result) {
         duel.stage = 'countdown';
-        duel.startTs = now + 7000; // 4с интро (VS) + 3с отсчёт
+        duel.startTs = now + 7000; // 4с интро VS + 3с отсчёт
         await saveDuel(duel);
       } else if (duel.acceptedAt && now - duel.acceptedAt > ACCEPT_TTL) {
         // соперник так и не вошёл — техническое поражение
@@ -292,12 +302,6 @@ module.exports = async function handler(req, res) {
       }
     }
 
-    // отсчёт закончился → бой
-    if (duel.stage === 'countdown' && duel.startTs && now >= duel.startTs) {
-      duel.stage = 'live';
-      await saveDuel(duel);
-    }
-
     // тапы игрока: атомарный инкремент (гонки исключены)
     let myScore = 0;
     if ((duel.stage === 'live') && delta > 0) {
@@ -317,7 +321,7 @@ module.exports = async function handler(req, res) {
         }
       }
 
-      if (myScore >= GOAL) {
+      if (duel.goal && myScore >= duel.goal) {
         const fin = await finishDuel(duel, userId, '100');
         const winner = fin ? fin.winner : (await getDuel(duelId))?.winner || userId;
         return res.status(200).json({ ok: true, stage: 'finished', winner, reason: '100', v: 'v5.1.1' });
@@ -352,10 +356,12 @@ module.exports = async function handler(req, res) {
       stage: duel.stage,
       me: { id: me.id, name: me.name, u: me.u || '', score: myScore },
       opp: { id: opp.id, name: opp.name, u: opp.u || '', score: oppScore, missing: oppMissing },
-      goal: GOAL,
+      goal: duel.goal || GOAL_DEFAULT,
+      stakeCur: duel.stakeCur || 'foc',
+      stake: duel.stake || 0,
       startTs: duel.startTs || 0,
       elapsed: duel.startTs ? Math.max(0, now - duel.startTs) : 0,
-      limit: DUEL_LIMIT,
+      limit: duel.timeMs || DUEL_LIMIT,
       serverNow: now,
       winner: duel.winner || null,
       reason: duel.reason || null,
