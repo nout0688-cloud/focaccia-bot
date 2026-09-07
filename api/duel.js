@@ -162,6 +162,20 @@ async function getDuel(duelId) {
   try { return JSON.parse(raw.result); } catch { return null; }
 }
 
+// Если finishDuel вернул null (SETNX занят — кто-то уже зафиксировал победителя раньше),
+// читаем duel_result из Redis и возвращаем реального победителя.
+// Это устраняет race condition: захардкоженный winner в return-блоке мог перебить настоящего победителя.
+async function getTrueWinner(duelId, fallbackWinner) {
+  try {
+    const raw = await redis('GET', `duel_result:${duelId}`);
+    if (raw?.result) {
+      const parsed = JSON.parse(raw.result);
+      if (parsed?.winner) return { winner: parsed.winner, reason: parsed.reason };
+    }
+  } catch { /* fallback */ }
+  return { winner: fallbackWinner, reason: null };
+}
+
 async function saveDuel(duel) {
   const ttl = duel.stage === 'finished' || duel.stage === 'cancelled' ? 3600 : 7200;
   await redis('SET', `duel:${duel.id}`, JSON.stringify(duel), 'EX', ttl);
@@ -490,13 +504,15 @@ module.exports = async function handler(req, res) {
           await saveDuel(duel);
         } else if (now - (duel.pausedAt || now) > PAUSE_MS) {
           const fin = await finishDuel(duel, userId, 'forfeit');
-          return res.status(200).json({ ok: true, stage: 'finished', winner: fin?.winner || userId, reason: 'forfeit', v: 'v5.1.1' });
+          const { winner: trueWinner } = fin ?? await getTrueWinner(duelId, userId);
+          return res.status(200).json({ ok: true, stage: 'finished', winner: trueWinner, reason: 'forfeit', v: 'v5.1.1' });
         }
       }
       // лимит времени: 15 минут чистой игры → ничья
       if (duel.stage === 'live' && duel.startTs && now - duel.startTs > DUEL_LIMIT) {
-        await finishDuel(duel, 'draw', 'time');
-        return res.status(200).json({ ok: true, stage: 'finished', winner: 'draw', reason: 'time', v: 'v5.1.1' });
+        const fin = await finishDuel(duel, 'draw', 'time');
+        const { winner: trueWinner, reason: trueReason } = fin ?? await getTrueWinner(duelId, 'draw');
+        return res.status(200).json({ ok: true, stage: 'finished', winner: trueWinner, reason: trueReason || 'time', v: 'v5.1.1' });
       }
     }
 
@@ -515,14 +531,15 @@ module.exports = async function handler(req, res) {
         if (v >= RATE_VIOLATIONS) {
           const fin = await finishDuel(duel, opp.id, 'cheat');
           await setKarma(userId, Math.max(0, (await getKarma(userId)) - 10));
-          return res.status(200).json({ ok: true, stage: 'finished', winner: opp.id, reason: 'cheat', v: 'v5.1.1' });
+          const { winner: trueWinner } = fin ?? await getTrueWinner(duelId, opp.id);
+          return res.status(200).json({ ok: true, stage: 'finished', winner: trueWinner, reason: 'cheat', v: 'v5.1.1' });
         }
       }
 
       if (duel.goal && myScore >= duel.goal) {
         const fin = await finishDuel(duel, userId, '100');
-        const winner = fin ? fin.winner : (await getDuel(duelId))?.winner || userId;
-        return res.status(200).json({ ok: true, stage: 'finished', winner, reason: '100', v: 'v5.1.1' });
+        const { winner: trueWinner } = fin ?? await getTrueWinner(duelId, userId);
+        return res.status(200).json({ ok: true, stage: 'finished', winner: trueWinner, reason: '100', v: 'v5.1.1' });
       }
     }
 
@@ -532,7 +549,8 @@ module.exports = async function handler(req, res) {
       const oppSeenTs = oppSeenRaw?.result ? parseInt(oppSeenRaw.result) : 0;
       if (oppSeenTs > 0 && now - oppSeenTs > PAUSE_MS) {
         const fin = await finishDuel(duel, userId, 'forfeit');
-        return res.status(200).json({ ok: true, stage: 'finished', winner: fin?.winner || userId, reason: 'forfeit', v: 'v5.1.1' });
+        const { winner: trueWinner } = fin ?? await getTrueWinner(duelId, userId);
+        return res.status(200).json({ ok: true, stage: 'finished', winner: trueWinner, reason: 'forfeit', v: 'v5.1.1' });
       }
     }
 
