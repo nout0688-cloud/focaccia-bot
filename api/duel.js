@@ -180,6 +180,7 @@ async function finishDuel(duel, winner, reason) {
 
   const set = await redis('SET', `duel_result:${duel.id}`, JSON.stringify({ winner, reason, ts: Date.now() }), 'NX');
   if (!set?.result) return null; // уже зафиксировано другим финишем
+  const preStage = duel.stage; // сохраняем stage ДО изменения
   duel.stage = 'finished';
   duel.winner = winner;
   duel.reason = reason;
@@ -187,7 +188,7 @@ async function finishDuel(duel, winner, reason) {
 
   const sym = duel.stakeCur === 'gem' ? '💎' : '🫓';
   // Якщо бій не розпочався (forfeit до старту гри) — банк НЕ подвоюється, а лише повертається своя ставка!
-  const isPreGameForfeit = reason === 'forfeit' && (!duel.startTs || duel.stage !== 'live');
+  const isPreGameForfeit = reason === 'forfeit' && (!duel.startTs || preStage !== 'live');
   const totalPot = isPreGameForfeit ? (duel.stake || 0) : ((duel.stake || 0) * 2);
   const draw = winner === 'draw';
 
@@ -330,6 +331,9 @@ module.exports = async function handler(req, res) {
 
       const duelId = String(body.duelId || '');
       const userId = String(body.userId || '');
+      if (!duelId || !userId || !/^\d{1,20}$/.test(userId)) {
+        return res.status(400).json({ ok: false, error: 'invalid params' });
+      }
       const duel = await getDuel(duelId);
       if (!duel) return res.status(200).json({ ok: false, error: 'not found' });
       const isP1 = duel.p1.id === userId;
@@ -419,6 +423,9 @@ module.exports = async function handler(req, res) {
     const q = isGet ? req.query : req.body || {};
     const duelId = String(q.duelId || '');
     const userId = String(q.userId || '');
+    if (!duelId || !userId || !/^\d{1,20}$/.test(userId)) {
+      return res.status(400).json({ ok: false, error: 'invalid params' });
+    }
     const delta = isGet ? 0 : Math.max(0, Math.min(Math.floor(Number(q.delta)) || 0, 200));
 
     const duel = await getDuel(duelId);

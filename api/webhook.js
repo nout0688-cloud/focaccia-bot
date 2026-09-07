@@ -4,7 +4,7 @@
  */
 
 const WEBAPP_URL = 'https://nout0688-cloud.github.io/focaccia-clicker/?v=1.1.3';
-const ADMIN_ID = process.env.ADMIN_ID ? parseInt(process.env.ADMIN_ID, 10) : 1975429762;
+const ADMIN_ID = process.env.ADMIN_ID ? parseInt(process.env.ADMIN_ID, 10) : null;
 
 async function redis(...args) {
   const url = process.env.KV_REST_API_URL;
@@ -459,7 +459,7 @@ module.exports = async function handler(req, res) {
         `🫓 Фокача Клікер — клікай, їж, прокачуйся!\n\n` +
         `🏗️ Будуй пекарні, наймай бабусь, відкривай філії в Італії та навіть запускай космічні пекарні! 🚀\n\n` +
         `⚡ Фішки гри:\n` +
-        `• Комбо-система до x3\n` +
+        `• Комбо-система до x100\n` +
         `• 5% шанс криту x10 💥\n` +
         `• Золота фокача з бонусами ✨\n` +
         `• Френзі x7 🔥\n` +
