@@ -35,7 +35,7 @@ async function redis(...args) {
   return res.json();
 }
 
-function parsePlayers(data) {
+function parsePlayers(data, balanceMap = null, sortBy = 'total') {
   if (!data?.result || data.result.length === 0) return [];
   const players = [];
   const entries = data.result;
@@ -44,17 +44,28 @@ function parsePlayers(data) {
       const p = JSON.parse(entries[i + 1]);
       if (p.ts && Date.now() - p.ts > FRESH_MS) continue; // протухлий запис
       if (p.n && p.n.includes('\uFFFD')) continue; // пошкоджене кодування — приховуємо
+      const id = String(entries[i]);
+      const bal = balanceMap ? balanceMap.get(id) : null;
+      const diamonds = p.d !== undefined ? Math.max(0, parseInt(p.d, 10) || 0) : (bal?.d || 0);
       players.push({
-        id: String(entries[i]),
+        id,
         name: p.n || 'Гравець',
         username: p.u || '',
         total: Number(p.t) || 0,
         prestige: parseInt(p.p, 10) || 0,
+        diamonds,
         online: !!p.ts && Date.now() - p.ts < ONLINE_MS,
       });
     } catch { /* skip corrupted */ }
   }
-  players.sort((a, b) => (b.total > a.total ? 1 : b.total < a.total ? -1 : (b.prestige || 0) - (a.prestige || 0)));
+
+  if (sortBy === 'diamonds') {
+    players.sort((a, b) => (b.diamonds - a.diamonds) || (b.total > a.total ? 1 : b.total < a.total ? -1 : 0) || (b.prestige - a.prestige));
+  } else if (sortBy === 'rebirth' || sortBy === 'prestige') {
+    players.sort((a, b) => (b.prestige - a.prestige) || (b.total > a.total ? 1 : b.total < a.total ? -1 : 0) || (b.diamonds - a.diamonds));
+  } else {
+    players.sort((a, b) => (b.total > a.total ? 1 : b.total < a.total ? -1 : (b.prestige - a.prestige) || (b.diamonds - a.diamonds)));
+  }
   return players;
 }
 
@@ -125,6 +136,7 @@ module.exports = async function handler(req, res) {
 
       const total = Math.max(0, Math.min(Number(body.total) || 0, 1e24));
       const prestige = Math.max(0, Math.min(parseInt(body.prestige, 10) || 0, 1e6));
+      const diamonds = Math.max(0, Math.min(parseInt(body.diamonds, 10) || 0, 1e9));
       const clicks = Math.max(0, Math.min(Math.floor(Number(body.clicks)) || 0, 1e9));
       const name = String(body.name || 'Гравець')
         .replace(/\uFFFD/g, '') // вирізаємо пошкоджені символи кодування
@@ -161,7 +173,7 @@ module.exports = async function handler(req, res) {
       // Карма < 25 — «Тінь бабусі»: прогрес у лідерборді заморожено
       const frozen = karma < 25 && prev && typeof prev.t === 'number';
       const storedTotal = frozen ? prev.t : total;
-      await redis('HSET', 'leaderboard', userId, JSON.stringify({ n: name, u: username, t: storedTotal, p: prestige, k: clicks, ts: now }));
+      await redis('HSET', 'leaderboard', userId, JSON.stringify({ n: name, u: username, t: storedTotal, p: prestige, d: diamonds, k: clicks, ts: now }));
 
       // Автоматичне оновлення users та usernames при звіті клієнта
       try {
@@ -203,14 +215,38 @@ module.exports = async function handler(req, res) {
         await redis('HSET', 'user_balance', userId, JSON.stringify({ f: finalFoc, d: finalDia, ts: now }));
       }
 
-      // Рахуємо місце гравця одразу після оновлення
-      const rank = parsePlayers(await redis('HGETALL', 'leaderboard')).findIndex((p) => p.id === userId) + 1;
+      // Рахуємо місце гравця одразу після оновлення для всіх 3 категорій
+      const allPlayers = parsePlayers(await redis('HGETALL', 'leaderboard'), null, 'total');
+      const rankTotal = allPlayers.findIndex((p) => p.id === userId) + 1;
+      const rankDiamonds = [...allPlayers].sort((a, b) => (b.diamonds - a.diamonds) || (b.total - a.total)).findIndex((p) => p.id === userId) + 1;
+      const rankRebirth = [...allPlayers].sort((a, b) => (b.prestige - a.prestige) || (b.total - a.total)).findIndex((p) => p.id === userId) + 1;
 
-      return res.status(200).json({ ok: true, rank: rank > 0 ? rank : null, karma, frozen });
+      return res.status(200).json({
+        ok: true,
+        rank: rankTotal > 0 ? rankTotal : null,
+        ranks: {
+          total: rankTotal > 0 ? rankTotal : null,
+          diamonds: rankDiamonds > 0 ? rankDiamonds : null,
+          rebirth: rankRebirth > 0 ? rankRebirth : null,
+        },
+        karma,
+        frozen,
+      });
     }
 
     // ===== GET — топ гравців (з позначками ⚠️) =====
-    const activeData = await redis('HGETALL', 'ac_karma');
+    let sortBy = 'total';
+    try {
+      const urlObj = new URL(req.url, 'http://localhost');
+      sortBy = req.query?.sort || req.query?.category || urlObj.searchParams.get('sort') || urlObj.searchParams.get('category') || 'total';
+    } catch { /* ignore */ }
+
+    const [activeData, lbData, balancesData] = await Promise.all([
+      redis('HGETALL', 'ac_karma'),
+      redis('HGETALL', 'leaderboard'),
+      redis('HGETALL', 'user_balance'),
+    ]);
+
     const karmaMap = new Map();
     if (activeData?.result) {
       for (let i = 0; i < activeData.result.length; i += 2) {
@@ -218,10 +254,20 @@ module.exports = async function handler(req, res) {
       }
     }
 
-    const players = parsePlayers(await redis('HGETALL', 'leaderboard'))
+    const balanceMap = new Map();
+    if (balancesData?.result) {
+      for (let i = 0; i < balancesData.result.length; i += 2) {
+        try {
+          const b = JSON.parse(balancesData.result[i + 1]);
+          balanceMap.set(String(balancesData.result[i]), { d: Number(b.d) || 0, f: Number(b.f) || 0 });
+        } catch { /* */ }
+      }
+    }
+
+    const players = parsePlayers(lbData, balanceMap, sortBy)
       .slice(0, 50)
       .map((p) => ({ ...p, flag: (karmaMap.get(p.id) ?? 100) < 50 }));
-    return res.status(200).json({ ok: true, players });
+    return res.status(200).json({ ok: true, players, sortBy });
   } catch (err) {
     console.error('Leaderboard error:', err);
     if (req.method === 'POST') return res.status(200).json({ ok: false });
