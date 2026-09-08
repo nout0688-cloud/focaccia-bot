@@ -525,6 +525,7 @@ module.exports = async function handler(req, res) {
           `• \`/takefrom <username> <кількість>\` — списати фокачі при вході\n` +
           `• \`/lb_clear\` — очистити лідерборд\n` +
           `• \`/reports\` — звіт античиту (хто детектило)\n` +
+          `• \`/aclog <username>\` — дебаг-лог детектів (TXT файл)\n` +
           `• \`/warn <username>\` — видати знак ⚠️ вручну\n` +
           `• \`/unflag <username>\` — зняти знак ⚠️ з гравця\n` +
           `• \`/reset <username>\` — скинути акаунт юзера\n` +
@@ -834,6 +835,7 @@ module.exports = async function handler(req, res) {
       await redis('DEL', 'ac_active');
       await redis('DEL', 'ac_karma');
       await redis('DEL', 'ac_strikes');
+      await redis('DEL', 'ac_debug_log');
       await sendTg(TOKEN, 'sendMessage', {
         chat_id: chatId,
         text: '✅ Лідерборд, карма та лічильники античиту очищено! Гравці повернуться туди протягом хвилини гри.',
@@ -913,6 +915,104 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: true });
     }
 
+    // /aclog <username> — дебаг-лог детектів гравця (TXT файл)
+    if (cmd.startsWith('/aclog ') || cmd.startsWith('aclog ')) {
+      const targetUsername = text.replace(/^\/?aclog\s+/i, '').replace('@', '').toLowerCase().trim();
+      if (!targetUsername) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Формат: /aclog <username>' });
+        return res.status(200).json({ ok: true });
+      }
+      const targetData = await redis('HGET', 'usernames', targetUsername);
+      if (!targetData?.result) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: `❌ Юзер @${targetUsername} не знайдений.` });
+        return res.status(200).json({ ok: true });
+      }
+
+      const targetChatId = targetData.result;
+
+      // Karma
+      let karma = 100;
+      const kRaw = await redis('HGET', 'ac_karma', targetChatId);
+      if (kRaw?.result) { try { karma = Math.max(0, Math.min(100, JSON.parse(kRaw.result).k || 0)); } catch { /* */ } }
+
+      // Total detects
+      const totalRaw = await redis('HGET', 'ac_total', targetChatId);
+      const totalDetects = totalRaw?.result ? (parseInt(totalRaw.result) || 0) : 0;
+
+      // Debug logs
+      let logs = [];
+      const logsRaw = await redis('HGET', 'ac_debug_log', targetChatId);
+      if (logsRaw?.result) { try { logs = JSON.parse(logsRaw.result); } catch { logs = []; } }
+
+      // Strikes (timestamps)
+      let strikes = [];
+      const sRaw = await redis('HGET', 'ac_strikes', targetChatId);
+      if (sRaw?.result) { try { strikes = JSON.parse(sRaw.result); } catch { strikes = []; } }
+
+      // Формуємо TXT
+      let txt = `=== TAPSENTINEL DEBUG LOG ===\n`;
+      txt += `Гравець: @${targetUsername} (ID: ${targetChatId})\n`;
+      txt += `Карма: ${karma}/100\n`;
+      txt += `Всього детектів: ${totalDetects}\n`;
+      txt += `Дата звіту: ${new Date().toISOString()}\n`;
+      txt += `\n=== СТРАЙКИ (timestamps) ===\n`;
+      if (strikes.length === 0) {
+        txt += `(немає)\n`;
+      } else {
+        strikes.forEach((ts, i) => {
+          txt += `  Strike ${i + 1}: ${new Date(ts).toISOString()}\n`;
+        });
+      }
+
+      txt += `\n=== ДЕБАГ ДЕТЕКТІВ (останні ${logs.length}) ===\n`;
+      if (logs.length === 0) {
+        txt += `(немає записів — можливо, старі детекти до оновлення)\n`;
+      } else {
+        logs.forEach((entry, i) => {
+          txt += `\n--- Detect ${i + 1} ---\n`;
+          txt += `  Час: ${entry.ts ? new Date(entry.ts).toISOString() : 'N/A'}\n`;
+          txt += `  R (ритм):     ${entry.R ?? '?'}/100\n`;
+          txt += `  C (координати): ${entry.C ?? '?'}/100\n`;
+          txt += `  B (поведінка):  ${entry.B ?? '?'}/100\n`;
+          txt += `  H (людяність):  ${entry.H ?? '?'}/100\n`;
+          txt += `  Evidence:       ${entry.evidence ?? '?'}\n`;
+          txt += `  Suspicion:      ${entry.suspicion ?? '?'}\n`;
+          txt += `  Indep. signals: ${entry.independentSignals ?? '?'}\n`;
+          txt += `  Strong ratio:   ${entry.strongRatio ?? '?'}\n`;
+          txt += `  VStrong ratio:  ${entry.veryStrongRatio ?? '?'}\n`;
+          txt += `  Metronome:      ${entry.metronome ?? '?'}\n`;
+          txt += `  CV40:           ${entry.cv40 ?? '?'}\n`;
+          txt += `  ExtremeBoost:   ${entry.extremeSpeedBoost ?? '?'}\n`;
+          txt += `  Taps (40):      ${entry.taps40count ?? '?'}\n`;
+          txt += `  Taps (300):     ${entry.taps300count ?? '?'}\n`;
+          txt += `  Інтервали (мс): ${entry.ivs40 || 'N/A'}\n`;
+        });
+      }
+
+      // Відправляємо як документ
+      const boundary = '----FormBoundary' + Date.now();
+      const fileName = `aclog_${targetUsername}_${Date.now()}.txt`;
+      const fileContent = Buffer.from(txt, 'utf-8');
+
+      const bodyParts = [
+        `--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${chatId}`,
+        `--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n🛡 Debug log для @${targetUsername}\nДетектів: ${totalDetects} | Карма: ${karma}/100`,
+        `--${boundary}\r\nContent-Disposition: form-data; name="document"; filename="${fileName}"\r\nContent-Type: text/plain\r\n\r\n`,
+      ];
+
+      const beforeFile = Buffer.from(bodyParts.join('\r\n') + '\r\n', 'utf-8');
+      const afterFile = Buffer.from(`\r\n--${boundary}--\r\n`, 'utf-8');
+      const fullBody = Buffer.concat([beforeFile, fileContent, afterFile]);
+
+      await fetch(`https://api.telegram.org/bot${TOKEN}/sendDocument`, {
+        method: 'POST',
+        headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
+        body: fullBody,
+      });
+
+      return res.status(200).json({ ok: true });
+    }
+
     // /warn <username> — вручну видати знак ⚠️ і знизити карму
     if (cmd.startsWith('/warn ') || cmd.startsWith('warn ')) {
       const targetUsername = text.replace(/^\/?warn\s+/i, '').replace('@', '').toLowerCase().trim();
@@ -957,6 +1057,7 @@ module.exports = async function handler(req, res) {
       await redis('HDEL', 'ac_active', targetChatId);
       await redis('HDEL', 'ac_total', targetChatId);
       await redis('HDEL', 'ac_strikes', targetChatId);
+      await redis('HDEL', 'ac_debug_log', targetChatId);
       await sendTg(TOKEN, 'sendMessage', {
         chat_id: chatId,
         text: `✅ *@${targetUsername}* повністю прощений: карма відновлена до *100/100*, знак ⚠️ та всі обмеження знято.`,

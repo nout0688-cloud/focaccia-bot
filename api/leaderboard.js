@@ -91,6 +91,16 @@ module.exports = async function handler(req, res) {
         await redis('HSET', 'ac_strikes', userId, JSON.stringify(strikes));
         await redis('HINCRBY', 'ac_total', userId, '1');
 
+        // Зберігаємо дебаг-лог детекту (останні 20 записів)
+        if (body.debug && typeof body.debug === 'object') {
+          let logs = [];
+          const logsRaw = await redis('HGET', 'ac_debug_log', userId);
+          if (logsRaw?.result) { try { logs = JSON.parse(logsRaw.result); } catch { logs = []; } }
+          logs.push(body.debug);
+          if (logs.length > 20) logs = logs.slice(-20);
+          await redis('HSET', 'ac_debug_log', userId, JSON.stringify(logs));
+        }
+
         const recent24 = strikes.filter((ts) => now - ts < 24 * 3600000).length;
         const { k } = await getKarma(userId);
         let karma = k;
