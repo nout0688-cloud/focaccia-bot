@@ -138,6 +138,113 @@ function isAdmin(userId) {
   return ADMIN_ID !== null && userId === ADMIN_ID;
 }
 
+async function resolveTargetUser(input) {
+  if (!input) return null;
+  const raw = String(input).replace(/^@/, '').trim();
+  if (!raw) return null;
+
+  // 1. Якщо це числовий ID (наприклад 1975429762)
+  if (/^\d{4,25}$/.test(raw)) {
+    const id = raw;
+    let username = '';
+    let name = `ID ${id}`;
+
+    const uData = await redis('HGET', 'users', id);
+    if (uData?.result) {
+      try {
+        const u = JSON.parse(uData.result);
+        if (u.username) username = u.username;
+        if (u.name) name = u.name;
+      } catch { /* */ }
+    } else {
+      const lbData = await redis('HGET', 'leaderboard', id);
+      if (lbData?.result) {
+        try {
+          const lb = JSON.parse(lbData.result);
+          if (lb.u) username = lb.u;
+          if (lb.n) name = lb.n;
+        } catch { /* */ }
+      }
+    }
+
+    return {
+      id,
+      username,
+      name,
+      display: username ? `@${username} (\`${id}\`)` : `\`${id}\``,
+      shortDisplay: username ? `@${username}` : `\`${id}\``,
+    };
+  }
+
+  // 2. Пошук по таблиці usernames
+  const unameKey = raw.toLowerCase();
+  const tData = await redis('HGET', 'usernames', unameKey);
+  if (tData?.result) {
+    const id = String(tData.result);
+    let name = raw;
+    let username = raw;
+    const uData = await redis('HGET', 'users', id);
+    if (uData?.result) {
+      try {
+        const u = JSON.parse(uData.result);
+        if (u.name) name = u.name;
+        if (u.username) username = u.username;
+      } catch { /* */ }
+    }
+    return {
+      id,
+      username,
+      name,
+      display: `@${username} (\`${id}\`)`,
+      shortDisplay: `@${username}`,
+    };
+  }
+
+  // 3. Fallback: пошук у хеші users (якщо маппінг usernames застарів)
+  const usersData = await redis('HGETALL', 'users');
+  if (usersData?.result) {
+    for (let i = 0; i < usersData.result.length; i += 2) {
+      const id = String(usersData.result[i]);
+      try {
+        const u = JSON.parse(usersData.result[i + 1]);
+        if (u.username && u.username.toLowerCase() === unameKey) {
+          await redis('HSET', 'usernames', unameKey, id);
+          return {
+            id,
+            username: u.username,
+            name: u.name || id,
+            display: `@${u.username} (\`${id}\`)`,
+            shortDisplay: `@${u.username}`,
+          };
+        }
+      } catch { /* */ }
+    }
+  }
+
+  // 4. Fallback: пошук у leaderboard
+  const lbData = await redis('HGETALL', 'leaderboard');
+  if (lbData?.result) {
+    for (let i = 0; i < lbData.result.length; i += 2) {
+      const id = String(lbData.result[i]);
+      try {
+        const lb = JSON.parse(lbData.result[i + 1]);
+        if (lb.u && lb.u.toLowerCase() === unameKey) {
+          await redis('HSET', 'usernames', unameKey, id);
+          return {
+            id,
+            username: lb.u,
+            name: lb.n || id,
+            display: `@${lb.u} (\`${id}\`)`,
+            shortDisplay: `@${lb.u}`,
+          };
+        }
+      } catch { /* */ }
+    }
+  }
+
+  return null;
+}
+
 module.exports = async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(200).json({ ok: true, msg: '🫓 Focaccia bot is alive!' });
@@ -419,31 +526,30 @@ module.exports = async function handler(req, res) {
         scheduleMessageDeletion(chatId, msg.message_id, DUEL_MSG_CLEANUP_TTL).catch(() => {});
       }
       if (text.startsWith('/')) {
-        await sendDuelTg(TOKEN, 'sendMessage', { chat_id: Number(chatId), text: 'Ввод юзернейма отменён.' });
+        await sendDuelTg(TOKEN, 'sendMessage', { chat_id: Number(chatId), text: 'Ввід відмінено.' });
         return res.status(200).json({ ok: true });
       }
-      const uname = text.replace(/^@/, '').toLowerCase().trim();
-      const tId = await redis('HGET', 'usernames', uname);
-      if (!tId?.result) {
+      const target = await resolveTargetUser(text);
+      if (!target) {
         await redis('SET', `duel_await:${chatId}`, 'duel', 'EX', 300);
-        await sendDuelTg(TOKEN, 'sendMessage', { chat_id: Number(chatId), text: `❌ Игрок @${uname} не найден. Попробуй ещё раз:` });
+        await sendDuelTg(TOKEN, 'sendMessage', { chat_id: Number(chatId), text: `❌ Гравця ${text} не знайдено (вкажи @username або числовий ID). Спробуй ще раз:` });
         return res.status(200).json({ ok: true });
       }
-      const targetId = tId.result;
+      const targetId = target.id;
       if (String(targetId) === String(chatId)) {
-        await sendDuelTg(TOKEN, 'sendMessage', { chat_id: Number(chatId), text: '❌ Нельзя вызвать самого себя' });
+        await sendDuelTg(TOKEN, 'sendMessage', { chat_id: Number(chatId), text: '❌ Не можна викликати самого себе' });
         return res.status(200).json({ ok: true });
       }
       await sendDuelTg(TOKEN, 'sendMessage', {
         chat_id: Number(chatId),
-        text: `💰 На что играем против @${uname}? Ставку списывает у обоих при старте — победитель забирает банк!`,
+        text: `💰 На що граємо проти ${target.shortDisplay}? Ставку списує в обох при старті — переможець забирає банк!`,
         reply_markup: {
           inline_keyboard: [
             [
               { text: '🫓 Фокачі', callback_data: `duel:cur:${targetId}:foc` },
               { text: '💎 Алмази', callback_data: `duel:cur:${targetId}:gem` },
             ],
-            [{ text: '❌ Отмена', callback_data: 'duel:cancel' }],
+            [{ text: '❌ Відміна', callback_data: 'duel:cancel' }],
           ],
         },
       });
@@ -513,23 +619,23 @@ module.exports = async function handler(req, res) {
         text:
           `👑 *АДМІН ПАНЕЛЬ*\n\n` +
           `👥 Користувачів: *${userCount}*\n\n` +
-          `📋 *Команди:*\n` +
+          `📋 *Команди (можна вказувати @username або ID):*\n` +
           `• \`/users\` — список всіх юзерів\n` +
-          `• \`/update_users\` — оновити юзернейми через Telegram API\n` +
+          `• \`/update_users [юзер|ID]\` — оновити юзернейми через Telegram API\n` +
           `• \`/broadcast <текст>\` — розсилка всім\n` +
           `• \`/give <кількість>\` — видати собі фокачі\n` +
-          `• \`/giveto <username> <кількість>\` — видати комусь\n` +
+          `• \`/giveto <юзер|ID> <кількість>\` — видати комусь\n` +
           `• \`/rebirth <кількість>\` — видати собі ребіртхи\n` +
-          `• \`/rebirthto <username> <кількість>\` — видати комусь ребіртхи\n` +
-          `• \`/check <username>\` — інфо про юзера\n` +
-          `• \`/clearreward <username>\` — очистити очікувану нагороду\n` +
-          `• \`/takefrom <username> <кількість>\` — списати фокачі при вході\n` +
+          `• \`/rebirthto <юзер|ID> <кількість>\` — видати комусь ребіртхи\n` +
+          `• \`/check <юзер|ID>\` — інфо про юзера\n` +
+          `• \`/clearreward <юзер|ID>\` — очистити очікувану нагороду\n` +
+          `• \`/takefrom <юзер|ID> <кількість>\` — списати фокачі при вході\n` +
           `• \`/lb_clear\` — очистити лідерборд\n` +
           `• \`/reports\` — звіт античиту (хто детектило)\n` +
-          `• \`/aclog <username>\` — дебаг-лог детектів (TXT файл)\n` +
-          `• \`/warn <username>\` — видати знак ⚠️ вручну\n` +
-          `• \`/unflag <username>\` — зняти знак ⚠️ з гравця\n` +
-          `• \`/reset <username>\` — скинути акаунт юзера\n` +
+          `• \`/aclog <юзер|ID>\` — дебаг-лог детектів (TXT файл)\n` +
+          `• \`/warn <юзер|ID>\` — видати знак ⚠️ вручну\n` +
+          `• \`/unflag <юзер|ID>\` — зняти знак ⚠️ з гравця\n` +
+          `• \`/reset <юзер|ID>\` — скинути акаунт юзера\n` +
           `• \`/reset_all\` — скинути акаунти ВСІХ гравців`,
         parse_mode: 'Markdown',
       });
@@ -811,26 +917,23 @@ module.exports = async function handler(req, res) {
       const raw = text.replace(/^\/?giveto\s+/i, '').trim();
       const parts = raw.split(/\s+/);
       if (parts.length < 2) {
-        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Формат: /giveto <username> <кількість>' });
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Формат: /giveto <username|ID> <кількість>' });
         return res.status(200).json({ ok: true });
       }
 
-      const targetUsername = parts[0].replace('@', '').toLowerCase();
       const amount = parseInt(parts[1]);
-
       if (!amount || amount <= 0) {
         await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Вкажи правильну кількість' });
         return res.status(200).json({ ok: true });
       }
 
-      // Find user by username
-      const targetData = await redis('HGET', 'usernames', targetUsername);
-      if (!targetData?.result) {
-        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: `❌ Юзер @${targetUsername} не знайдений. Він повинен спершу запустити бота.` });
+      const target = await resolveTargetUser(parts[0]);
+      if (!target) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: `❌ Користувача ${parts[0]} не знайдено (вкажи @username або числовий ID).` });
         return res.status(200).json({ ok: true });
       }
 
-      const targetChatId = targetData.result;
+      const targetChatId = target.id;
 
       // Add reward
       const existing = await redis('GET', `reward:${targetChatId}`);
@@ -849,7 +952,7 @@ module.exports = async function handler(req, res) {
 
       await sendTg(TOKEN, 'sendMessage', {
         chat_id: chatId,
-        text: `✅ Нараховано *${amount.toLocaleString()}* фокач юзеру @${targetUsername}!`,
+        text: `✅ Нараховано *${amount.toLocaleString()}* фокач для ${target.display}!`,
         parse_mode: 'Markdown',
       });
       return res.status(200).json({ ok: true });
@@ -860,26 +963,23 @@ module.exports = async function handler(req, res) {
       const raw = text.replace(/^\/?rebirthto\s+/i, '').trim();
       const parts = raw.split(/\s+/);
       if (parts.length < 2) {
-        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Формат: /rebirthto <username> <кількість>' });
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Формат: /rebirthto <username|ID> <кількість>' });
         return res.status(200).json({ ok: true });
       }
 
-      const targetUsername = parts[0].replace('@', '').toLowerCase();
       const amount = parseInt(parts[1]);
-
       if (!amount || amount <= 0) {
         await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Вкажи правильну кількість' });
         return res.status(200).json({ ok: true });
       }
 
-      // Find user by username
-      const targetData = await redis('HGET', 'usernames', targetUsername);
-      if (!targetData?.result) {
-        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: `❌ Юзер @${targetUsername} не знайдений. Він повинен спершу запустити бота.` });
+      const target = await resolveTargetUser(parts[0]);
+      if (!target) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: `❌ Користувача ${parts[0]} не знайдено (вкажи @username або числовий ID).` });
         return res.status(200).json({ ok: true });
       }
 
-      const targetChatId = targetData.result;
+      const targetChatId = target.id;
 
       // Add pending rebirths
       const existingRb = await redis('GET', `rebirth:${targetChatId}`);
@@ -898,7 +998,7 @@ module.exports = async function handler(req, res) {
 
       await sendTg(TOKEN, 'sendMessage', {
         chat_id: chatId,
-        text: `✅ Нараховано *${amount}* ребіртх(ів) юзеру @${targetUsername}!`,
+        text: `✅ Нараховано *${amount}* ребіртх(ів) для ${target.display}!`,
         parse_mode: 'Markdown',
       });
       return res.status(200).json({ ok: true });
@@ -925,21 +1025,21 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: true });
     }
 
-    // /check <username>
+    // /check <username|ID>
     if (cmd.startsWith('/check ') || cmd.startsWith('check ')) {
-      const targetUsername = text.replace(/^\/?check\s+/i, '').replace('@', '').toLowerCase().trim();
-      const targetData = await redis('HGET', 'usernames', targetUsername);
-      if (!targetData?.result) {
-        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: `❌ @${targetUsername} не знайдений` });
+      const targetArg = text.replace(/^\/?check\s+/i, '').trim();
+      const target = await resolveTargetUser(targetArg);
+      if (!target) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: `❌ Користувача ${targetArg} не знайдено` });
         return res.status(200).json({ ok: true });
       }
 
-      const targetChatId = targetData.result;
+      const targetChatId = target.id;
       const userData = await redis('HGET', 'users', targetChatId);
       const pending = await redis('GET', `reward:${targetChatId}`);
       const pendingRb = await redis('GET', `rebirth:${targetChatId}`);
 
-      let info = `👤 *@${targetUsername}*\nID: \`${targetChatId}\`\n`;
+      let info = `👤 *${target.display}*\nID: \`${targetChatId}\`\n`;
       if (userData?.result) {
         try {
           const u = JSON.parse(userData.result);
@@ -965,51 +1065,51 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: true });
     }
 
-    // /clearreward <username> — clear pending rewards
+    // /clearreward <username|ID> — clear pending rewards
     if (cmd.startsWith('/clearreward ') || cmd.startsWith('clearreward ')) {
-      const targetUsername = text.replace(/^\/?clearreward\s+/i, '').replace('@', '').toLowerCase().trim();
-      const targetData = await redis('HGET', 'usernames', targetUsername);
-      if (!targetData?.result) {
-        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: `❌ @${targetUsername} не знайдений` });
+      const targetArg = text.replace(/^\/?clearreward\s+/i, '').trim();
+      const target = await resolveTargetUser(targetArg);
+      if (!target) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: `❌ Користувача ${targetArg} не знайдено` });
         return res.status(200).json({ ok: true });
       }
-      const targetChatId = targetData.result;
+      const targetChatId = target.id;
       await redis('DEL', `reward:${targetChatId}`);
       await redis('DEL', `reward_gem:${targetChatId}`);
       await sendTg(TOKEN, 'sendMessage', {
         chat_id: chatId,
-        text: `✅ Очікувані нагороди для @${targetUsername} повністю очищено!`,
+        text: `✅ Очікувані нагороди для ${target.display} повністю очищено!`,
+        parse_mode: 'Markdown',
       });
       return res.status(200).json({ ok: true });
     }
 
-    // /takefrom <username> <amount> — deduct focaccia on next game entry
+    // /takefrom <username|ID> <amount> — deduct focaccia on next game entry
     if (cmd.startsWith('/takefrom ') || cmd.startsWith('takefrom ')) {
       const raw = text.replace(/^\/?takefrom\s+/i, '').trim();
       const parts = raw.split(/\s+/);
       if (parts.length < 2) {
-        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Формат: /takefrom <username> <кількість>' });
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Формат: /takefrom <username|ID> <кількість>' });
         return res.status(200).json({ ok: true });
       }
-      const targetUsername = parts[0].replace('@', '').toLowerCase();
       const amount = parseInt(parts[1]);
       if (!amount || amount <= 0) {
         await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Вкажи правильну кількість' });
         return res.status(200).json({ ok: true });
       }
-      const targetData = await redis('HGET', 'usernames', targetUsername);
-      if (!targetData?.result) {
-        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: `❌ @${targetUsername} не знайдений` });
+      const target = await resolveTargetUser(parts[0]);
+      if (!target) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: `❌ Користувача ${parts[0]} не знайдено` });
         return res.status(200).json({ ok: true });
       }
-      const targetChatId = targetData.result;
+      const targetChatId = target.id;
       await redis('DEL', `reward:${targetChatId}`);
       const exDeduct = await redis('GET', `deduct:${targetChatId}`);
       const curD = exDeduct?.result ? parseInt(exDeduct.result) : 0;
       await redis('SET', `deduct:${targetChatId}`, String(curD + amount));
       await sendTg(TOKEN, 'sendMessage', {
         chat_id: chatId,
-        text: `✅ Встановлено списання *${amount.toLocaleString()}* фокач для @${targetUsername} при наступному вході в гру (та очищено очікувані нагороди).`,
+        text: `✅ Встановлено списання *${amount.toLocaleString()}* фокач для ${target.display} при наступному вході в гру (та очищено очікувані нагороди).`,
         parse_mode: 'Markdown',
       });
       return res.status(200).json({ ok: true });
@@ -1102,20 +1202,21 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: true });
     }
 
-    // /aclog <username> — дебаг-лог детектів гравця (TXT файл)
+    // /aclog <username|ID> — дебаг-лог детектів гравця (TXT файл)
     if (cmd.startsWith('/aclog ') || cmd.startsWith('aclog ')) {
-      const targetUsername = text.replace(/^\/?aclog\s+/i, '').replace('@', '').toLowerCase().trim();
-      if (!targetUsername) {
-        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Формат: /aclog <username>' });
+      const targetArg = text.replace(/^\/?aclog\s+/i, '').trim();
+      if (!targetArg) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Формат: /aclog <username|ID>' });
         return res.status(200).json({ ok: true });
       }
-      const targetData = await redis('HGET', 'usernames', targetUsername);
-      if (!targetData?.result) {
-        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: `❌ Юзер @${targetUsername} не знайдений.` });
+      const target = await resolveTargetUser(targetArg);
+      if (!target) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: `❌ Користувача ${targetArg} не знайдено.` });
         return res.status(200).json({ ok: true });
       }
 
-      const targetChatId = targetData.result;
+      const targetChatId = target.id;
+      const targetUsername = target.username || targetChatId;
 
       // Karma
       let karma = 100;
@@ -1138,7 +1239,8 @@ module.exports = async function handler(req, res) {
 
       // Формуємо TXT
       let txt = `=== TAPSENTINEL DEBUG LOG ===\n`;
-      txt += `Гравець: @${targetUsername} (ID: ${targetChatId})\n`;
+      txt += `Гравець: ${target.name} (${target.display})\n`;
+      txt += `ID: ${targetChatId}\n`;
       txt += `Карма: ${karma}/100\n`;
       txt += `Всього детектів: ${totalDetects}\n`;
       txt += `Дата звіту: ${new Date().toISOString()}\n`;
@@ -1183,7 +1285,7 @@ module.exports = async function handler(req, res) {
 
       const bodyParts = [
         `--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${chatId}`,
-        `--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n🛡 Debug log для @${targetUsername}\nДетектів: ${totalDetects} | Карма: ${karma}/100`,
+        `--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n🛡 Debug log для ${target.display}\nДетектів: ${totalDetects} | Карма: ${karma}/100`,
         `--${boundary}\r\nContent-Disposition: form-data; name="document"; filename="${fileName}"\r\nContent-Type: text/plain\r\n\r\n`,
       ];
 
@@ -1200,20 +1302,20 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: true });
     }
 
-    // /warn <username> — вручну видати знак ⚠️ і знизити карму
+    // /warn <username|ID> — вручну видати знак ⚠️ і знизити карму
     if (cmd.startsWith('/warn ') || cmd.startsWith('warn ')) {
-      const targetUsername = text.replace(/^\/?warn\s+/i, '').replace('@', '').toLowerCase().trim();
-      if (!targetUsername) {
-        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Формат: /warn <username>' });
+      const targetArg = text.replace(/^\/?warn\s+/i, '').trim();
+      if (!targetArg) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Формат: /warn <username|ID>' });
         return res.status(200).json({ ok: true });
       }
-      const targetData = await redis('HGET', 'usernames', targetUsername);
-      if (!targetData?.result) {
-        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: `❌ Юзер @${targetUsername} не знайдений. Він повинен спершу запустити бота.` });
+      const target = await resolveTargetUser(targetArg);
+      if (!target) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: `❌ Користувача ${targetArg} не знайдено.` });
         return res.status(200).json({ ok: true });
       }
 
-      const targetChatId = targetData.result;
+      const targetChatId = target.id;
       // карма −15
       let karma = 100;
       const kRaw = await redis('HGET', 'ac_karma', targetChatId);
@@ -1224,22 +1326,22 @@ module.exports = async function handler(req, res) {
       if (karma < 50) await redis('HSET', 'ac_active', targetChatId, '1');
       await sendTg(TOKEN, 'sendMessage', {
         chat_id: chatId,
-        text: `⚠️ Знак видано *@${targetUsername}*. Карма: *${karma}/100*.\nЗняти всі обмеження: \`/unflag @${targetUsername}\``,
+        text: `⚠️ Знак видано для ${target.display}. Карма: *${karma}/100*.\nЗняти всі обмеження: \`/unflag ${target.shortDisplay}\``,
         parse_mode: 'Markdown',
       });
       return res.status(200).json({ ok: true });
     }
 
-    // /unflag <username> — повне відновлення: карма 100, без знаків і детектів
+    // /unflag <username|ID> — повне відновлення: карма 100, без знаків і детектів
     if (cmd.startsWith('/unflag ') || cmd.startsWith('unflag ')) {
-      const targetUsername = text.replace(/^\/?unflag\s+/i, '').replace('@', '').toLowerCase().trim();
-      const targetData = await redis('HGET', 'usernames', targetUsername);
-      if (!targetData?.result) {
-        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: `❌ @${targetUsername} не знайдений` });
+      const targetArg = text.replace(/^\/?unflag\s+/i, '').trim();
+      const target = await resolveTargetUser(targetArg);
+      if (!target) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: `❌ Користувача ${targetArg} не знайдено` });
         return res.status(200).json({ ok: true });
       }
 
-      const targetChatId = targetData.result;
+      const targetChatId = target.id;
       await redis('HSET', 'ac_karma', targetChatId, JSON.stringify({ k: 100, on: 0, ts: Date.now() }));
       await redis('HDEL', 'ac_active', targetChatId);
       await redis('HDEL', 'ac_total', targetChatId);
@@ -1247,43 +1349,43 @@ module.exports = async function handler(req, res) {
       await redis('HDEL', 'ac_debug_log', targetChatId);
       await sendTg(TOKEN, 'sendMessage', {
         chat_id: chatId,
-        text: `✅ *@${targetUsername}* повністю прощений: карма відновлена до *100/100*, знак ⚠️ та всі обмеження знято.`,
+        text: `✅ ${target.display} повністю прощений: карма відновлена до *100/100*, знак ⚠️ та всі обмеження знято.`,
         parse_mode: 'Markdown',
       });
       return res.status(200).json({ ok: true });
     }
 
-    // /reset <username> — request single user reset
+    // /reset <username|ID> — request single user reset
     if ((cmd.startsWith('/reset ') || cmd.startsWith('reset ')) && !cmd.includes('reset_all')) {
-      const targetUsername = text.replace(/^\/?reset\s+/i, '').replace('@', '').toLowerCase().trim();
-      const targetData = await redis('HGET', 'usernames', targetUsername);
-      if (!targetData?.result) {
-        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: `❌ @${targetUsername} не знайдений` });
+      const targetArg = text.replace(/^\/?reset\s+/i, '').trim();
+      const target = await resolveTargetUser(targetArg);
+      if (!target) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: `❌ Користувача ${targetArg} не знайдено` });
         return res.status(200).json({ ok: true });
       }
 
-      const targetChatId = targetData.result;
+      const targetChatId = target.id;
       await sendTg(TOKEN, 'sendMessage', {
         chat_id: chatId,
         text:
           `⚠️ *ПІДТВЕРДЖЕННЯ СКИДАННЯ АКАУНТУ*\n\n` +
-          `Ви дійсно хочете скинути весь прогрес для @${targetUsername} (ID: \`${targetChatId}\`)?\n\n` +
-          `👉 Для підтвердження відправте:\n\`/confirm_reset @${targetUsername}\``,
+          `Ви дійсно хочете скинути весь прогрес для ${target.display}?\n\n` +
+          `👉 Для підтвердження відправте:\n\`/confirm_reset ${target.shortDisplay}\``,
         parse_mode: 'Markdown',
       });
       return res.status(200).json({ ok: true });
     }
 
-    // /confirm_reset <username> — execute single user reset
+    // /confirm_reset <username|ID> — execute single user reset
     if (cmd.startsWith('/confirm_reset ') || cmd.startsWith('confirm_reset ')) {
-      const targetUsername = text.replace(/^\/?confirm_reset\s+/i, '').replace('@', '').toLowerCase().trim();
-      const targetData = await redis('HGET', 'usernames', targetUsername);
-      if (!targetData?.result) {
-        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: `❌ @${targetUsername} не знайдений` });
+      const targetArg = text.replace(/^\/?confirm_reset\s+/i, '').trim();
+      const target = await resolveTargetUser(targetArg);
+      if (!target) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: `❌ Користувача ${targetArg} не знайдено` });
         return res.status(200).json({ ok: true });
       }
 
-      const targetChatId = targetData.result;
+      const targetChatId = target.id;
       // Mark user for client reset and clear pending rewards
       await redis('SET', `reset:${targetChatId}`, '1');
       await redis('DEL', `reward:${targetChatId}`);
@@ -1300,7 +1402,8 @@ module.exports = async function handler(req, res) {
 
       await sendTg(TOKEN, 'sendMessage', {
         chat_id: chatId,
-        text: `✅ Акаунт @${targetUsername} позначено на скидання! При наступному запуску гри весь його прогрес очиститься.`,
+        text: `✅ Акаунт ${target.display} позначено на скидання! При наступному запуску гри весь його прогрес очиститься.`,
+        parse_mode: 'Markdown',
       });
       return res.status(200).json({ ok: true });
     }
