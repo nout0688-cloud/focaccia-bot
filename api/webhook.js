@@ -832,21 +832,22 @@ async function getAdminPanelMessage() {
       ],
       [
         { text: '🎁 Видати фокачі', callback_data: 'admin:menu:give' },
-        { text: '🔄 Видати ребіртхи', callback_data: 'admin:menu:rebirth' },
+        { text: '💎 Видати алмази', callback_data: 'admin:menu:diamonds' },
       ],
       [
-        { text: '🔍 Інфо про гравця', callback_data: 'admin:prompt:check' },
+        { text: '🔄 Видати ребіртхи', callback_data: 'admin:menu:rebirth' },
         { text: '⚖️ Списати фокачі', callback_data: 'admin:prompt:take' },
       ],
       [
-        { text: '🛡 Античит та звіти', callback_data: 'admin:menu:anticheat' },
+        { text: '🔍 Інфо про гравця', callback_data: 'admin:prompt:check' },
         { text: '📢 Розсилка всім', callback_data: 'admin:prompt:broadcast' },
       ],
       [
+        { text: '🛡 Античит та звіти', callback_data: 'admin:menu:anticheat' },
         { text: '🎉 Розіграші та конкурси', callback_data: 'admin:menu:contests' },
-        { text: '🏆 Очистити лідерборд', callback_data: 'admin:menu:lb_clear' },
       ],
       [
+        { text: '🏆 Очистити лідерборд', callback_data: 'admin:menu:lb_clear' },
         { text: '⚠️ Скидання акаунтів', callback_data: 'admin:menu:reset' },
       ],
       [
@@ -976,6 +977,36 @@ function renderRebirthMenu() {
       ],
       [
         { text: '👤 Видати іншому гравцю (@ або ID)', callback_data: 'admin:prompt:rebirthto' },
+      ],
+      [
+        { text: '⬅️ Назад до адмінки', callback_data: 'admin:back' },
+      ],
+    ],
+  };
+  return { text, parse_mode: 'Markdown', reply_markup };
+}
+
+function renderDiamondsMenu() {
+  const text =
+    `💎 *ВИДАЧА АЛМАЗІВ*\n\n` +
+    `Оберіть кількість алмазів для швидкої видачі собі або введіть значення для будь-якого гравця:`;
+  const reply_markup = {
+    inline_keyboard: [
+      [
+        { text: '➕ Собі +10 💎', callback_data: 'admin:diamond_self:10' },
+        { text: '➕ Собі +25 💎', callback_data: 'admin:diamond_self:25' },
+        { text: '➕ Собі +50 💎', callback_data: 'admin:diamond_self:50' },
+      ],
+      [
+        { text: '➕ Собі +100 💎', callback_data: 'admin:diamond_self:100' },
+        { text: '➕ Собі +250 💎', callback_data: 'admin:diamond_self:250' },
+        { text: '➕ Собі +1000 💎', callback_data: 'admin:diamond_self:1000' },
+      ],
+      [
+        { text: '✍️ Ввести іншу кількість собі', callback_data: 'admin:prompt:diamond_self' },
+      ],
+      [
+        { text: '👤 Видати іншому гравцю (@ або ID)', callback_data: 'admin:prompt:diamondto' },
       ],
       [
         { text: '⬅️ Назад до адмінки', callback_data: 'admin:back' },
@@ -1216,6 +1247,8 @@ async function renderUserCard(target) {
   const pendingReward = rewardRaw ? parseInt(rewardRaw) : 0;
   const rebirthRewardRaw = (await redis('GET', `rebirth:${uId}`))?.result;
   const pendingRebirth = rebirthRewardRaw ? parseInt(rebirthRewardRaw) : 0;
+  const diamondRewardRaw = (await redis('GET', `reward_gem:${uId}`))?.result;
+  const pendingDiamonds = diamondRewardRaw ? parseInt(diamondRewardRaw) : 0;
 
   const totalDetectsRaw = (await redis('HGET', 'ac_total', uId))?.result;
   const totalDetects = totalDetectsRaw ? parseInt(totalDetectsRaw) : 0;
@@ -1242,12 +1275,14 @@ async function renderUserCard(target) {
 
   text += `⚠️ Античит: *${isFlagged ? `🔴 Є ПРАПОРЕЦЬ (детектів: ${totalDetects}, карма: ${karma})` : '🟢 Чистий'}*\n`;
   if (pendingReward > 0) text += `🎁 Очікує нагороду: *${formatNum(pendingReward)}* 🫓\n`;
+  if (pendingDiamonds > 0) text += `💎 Очікує алмази: *+${pendingDiamonds}* 💎\n`;
   if (pendingRebirth > 0) text += `🔄 Очікує ребіртхи: *+${pendingRebirth}*\n`;
 
   const reply_markup = {
     inline_keyboard: [
       [
         { text: '🎁 Видати 🫓', callback_data: `admin:prompt:giveto_target:${uId}` },
+        { text: '💎 Видати 💎', callback_data: `admin:prompt:diamondto_target:${uId}` },
         { text: '🔄 Видати 🔄', callback_data: `admin:prompt:rebirthto_target:${uId}` },
       ],
       [
@@ -1256,7 +1291,7 @@ async function renderUserCard(target) {
       ],
       [
         { text: '📄 Дебаг-лог (TXT)', callback_data: `admin:user_aclog:${uId}` },
-        { text: '🧹 Очистити нагороду', callback_data: `admin:user_clearreward:${uId}` },
+        { text: '🧹 Очистити нагороди', callback_data: `admin:user_clearreward:${uId}` },
       ],
       [
         { text: '🗑 Скинути акаунт', callback_data: `admin:user_reset_confirm:${uId}` },
@@ -1751,6 +1786,142 @@ async function handleAdminAwaitInput(TOKEN, chatId, text, awaitData) {
       parse_mode: 'Markdown',
       reply_markup: {
         inline_keyboard: [[{ text: '🫓 Забрати ребіртхи!', web_app: { url: WEBAPP_URL } }]],
+      },
+    });
+
+    const card = await renderUserCard(target);
+    await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, ...card });
+    return;
+  }
+
+  if (action === 'diamond_self') {
+    const amt = parseAmountInput(text);
+    if (!amt || amt <= 0) {
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: '❌ Некоректна кількість алмазів. Вкажіть число (наприклад: 50 або 500):',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '✍️ Спробувати ще раз', callback_data: 'admin:prompt:diamond_self' }],
+            [{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }],
+          ],
+        },
+      });
+      return;
+    }
+    const existing = await redis('GET', `reward_gem:${chatId}`);
+    const current = existing?.result ? parseInt(existing.result) : 0;
+    await redis('SET', `reward_gem:${chatId}`, String(current + amt));
+
+    await sendTg(TOKEN, 'sendMessage', {
+      chat_id: chatId,
+      text: `✅ Нараховано *+${amt}* 💎 алмазів тобі!\n💎 Зайди в гру щоб отримати.`,
+      parse_mode: 'Markdown',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '💎 Видати ще', callback_data: 'admin:menu:diamonds' }],
+          [{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }],
+        ],
+      },
+    });
+    return;
+  }
+
+  if (action === 'diamondto') {
+    const parts = text.split(/\s+/);
+    if (parts.length < 2) {
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: '❌ Формат: `@username 100` або `1975429762 50`',
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '✍️ Спробувати ще раз', callback_data: 'admin:prompt:diamondto' }],
+            [{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }],
+          ],
+        },
+      });
+      return;
+    }
+    const target = await resolveTargetUser(parts[0]);
+    if (!target) {
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: `❌ Користувача ${parts[0]} не знайдено (вкажи @username або ID).`,
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '✍️ Спробувати ще раз', callback_data: 'admin:prompt:diamondto' }],
+            [{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }],
+          ],
+        },
+      });
+      return;
+    }
+    const amt = parseAmountInput(parts[1]);
+    if (!amt || amt <= 0) {
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: '❌ Некоректна кількість алмазів.',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '✍️ Спробувати ще раз', callback_data: 'admin:prompt:diamondto' }],
+            [{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }],
+          ],
+        },
+      });
+      return;
+    }
+    const targetChatId = target.id;
+    const existing = await redis('GET', `reward_gem:${targetChatId}`);
+    const current = existing?.result ? parseInt(existing.result) : 0;
+    await redis('SET', `reward_gem:${targetChatId}`, String(current + amt));
+
+    await sendTg(TOKEN, 'sendMessage', {
+      chat_id: Number(targetChatId),
+      text: `💎 Тобі нараховано *+${amt}* алмазів від адміна!\nЗайди в гру щоб отримати.`,
+      parse_mode: 'Markdown',
+      reply_markup: {
+        inline_keyboard: [[{ text: '🫓 Забрати алмази!', web_app: { url: WEBAPP_URL } }]],
+      },
+    });
+
+    await sendTg(TOKEN, 'sendMessage', {
+      chat_id: chatId,
+      text: `✅ Нараховано *+${amt}* 💎 алмазів для ${target.display}!`,
+      parse_mode: 'Markdown',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '👤 Відкрити картку гравця', callback_data: `admin:check_user:${targetChatId}` }],
+          [{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }],
+        ],
+      },
+    });
+    return;
+  }
+
+  if (action === 'diamondto_target') {
+    const target = await resolveTargetUser(targetId);
+    const amt = parseAmountInput(text);
+    if (!amt || amt <= 0 || !target) {
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: '❌ Некоректна кількість алмазів.',
+        reply_markup: {
+          inline_keyboard: [[{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }]],
+        },
+      });
+      return;
+    }
+    const existing = await redis('GET', `reward_gem:${target.id}`);
+    const current = existing?.result ? parseInt(existing.result) : 0;
+    await redis('SET', `reward_gem:${target.id}`, String(current + amt));
+
+    await sendTg(TOKEN, 'sendMessage', {
+      chat_id: Number(target.id),
+      text: `💎 Тобі нараховано *+${amt}* алмазів від адміна!\nЗайди в гру щоб отримати.`,
+      parse_mode: 'Markdown',
+      reply_markup: {
+        inline_keyboard: [[{ text: '🫓 Забрати алмази!', web_app: { url: WEBAPP_URL } }]],
       },
     });
 
@@ -2492,6 +2663,7 @@ module.exports = async function handler(req, res) {
 
         let menuData;
         if (sub === 'give') menuData = renderGiveMenu();
+        else if (sub === 'diamonds') menuData = renderDiamondsMenu();
         else if (sub === 'rebirth') menuData = renderRebirthMenu();
         else if (sub === 'anticheat') menuData = await renderAnticheatMenu();
         else if (sub === 'contests') menuData = await renderContestsAdminMenu();
@@ -2580,6 +2752,30 @@ module.exports = async function handler(req, res) {
         return res.status(200).json({ ok: true });
       }
 
+      // Видача алмазів собі (готові пресети)
+      if (action === 'diamond_self') {
+        const amt = parseInt(parts[2], 10);
+        if (amt && amt > 0) {
+          const ex = await redis('GET', `reward_gem:${cqChat}`);
+          const curR = ex?.result ? parseInt(ex.result) : 0;
+          await redis('SET', `reward_gem:${cqChat}`, String(curR + amt));
+          if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+          await sendTg(TOKEN, 'sendMessage', {
+            chat_id: cqChat,
+            text: `✅ Видано *+${amt}* 💎 алмазів! Зайдіть у гру, щоб отримати.`,
+            parse_mode: 'Markdown',
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '🫓 Відкрити гру', web_app: { url: WEBAPP_URL } }],
+                [{ text: '💎 Видати ще', callback_data: 'admin:menu:diamonds' }],
+                [{ text: '⬅️ Головне меню', callback_data: 'admin:back' }],
+              ],
+            },
+          });
+        }
+        return res.status(200).json({ ok: true });
+      }
+
       // Запит текстового введення від адміна (prompts)
       if (action === 'prompt') {
         const promptType = parts[2];
@@ -2594,14 +2790,20 @@ module.exports = async function handler(req, res) {
 
         if (promptType === 'give_self') {
           promptText = '✍️ *Введіть суму фокач для видачі собі:*\n(Можна вказувати `10m`, `500k`, `1b`, `50 000 000`)';
+        } else if (promptType === 'diamond_self') {
+          promptText = '✍️ *Введіть кількість алмазів для видачі собі:*\n(Наприклад: `25`, `100`, `1000`)';
         } else if (promptType === 'rebirth_self') {
           promptText = '✍️ *Введіть кількість ребіртхів для видачі собі:*\n(Наприклад: `5`, `10`, `25`)';
         } else if (promptType === 'giveto') {
           promptText = '✍️ *Видача фокач іншому гравцю*\nВведіть у форматі: `@username сума` або `ID сума`\nПриклад: `@durov 50m` або `1975429762 100000000`';
+        } else if (promptType === 'diamondto') {
+          promptText = '✍️ *Видача алмазів іншому гравцю*\nВведіть у форматі: `@username кількість` або `ID кількість`\nПриклад: `@durov 50` або `1975429762 100`';
         } else if (promptType === 'rebirthto') {
           promptText = '✍️ *Видача ребіртхів іншому гравцю*\nВведіть у форматі: `@username кількість` або `ID кількість`\nПриклад: `@durov 10` або `1975429762 5`';
         } else if (promptType === 'giveto_target') {
           promptText = `✍️ *Видача фокач для ${targetUser?.display || arg1}:*\nВведіть кількість (наприклад: \`50m\`, \`100000000\`)`;
+        } else if (promptType === 'diamondto_target') {
+          promptText = `✍️ *Видача алмазів для ${targetUser?.display || arg1}:*\nВведіть кількість (наприклад: \`50\`, \`250\`)`;
         } else if (promptType === 'rebirthto_target') {
           promptText = `✍️ *Видача ребіртхів для ${targetUser?.display || arg1}:*\nВведіть кількість (наприклад: \`5\`, \`20\`)`;
         } else if (promptType === 'take_target') {
@@ -2706,6 +2908,7 @@ module.exports = async function handler(req, res) {
       if (action === 'user_clearreward') {
         await redis('DEL', `reward:${targetId}`);
         await redis('DEL', `rebirth:${targetId}`);
+        await redis('DEL', `reward_gem:${targetId}`);
         await redis('DEL', `deduct:${targetId}`);
         const target = await resolveTargetUser(targetId);
         if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
@@ -2739,6 +2942,7 @@ module.exports = async function handler(req, res) {
         await redis('DEL', `save:${targetId}`);
         await redis('DEL', `reward:${targetId}`);
         await redis('DEL', `rebirth:${targetId}`);
+        await redis('DEL', `reward_gem:${targetId}`);
         await redis('DEL', `deduct:${targetId}`);
         await redis('HDEL', 'ac_karma', targetId);
         await redis('HDEL', 'ac_active', targetId);
@@ -3412,6 +3616,79 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: true });
     }
 
+    // /diamondto <username|ID> <amount>
+    if (cmd.startsWith('/diamondto ') || cmd.startsWith('diamondto ') || cmd.startsWith('/gemto ') || cmd.startsWith('gemto ')) {
+      const raw = text.replace(/^\/?(diamondto|gemto)\s+/i, '').trim();
+      const parts = raw.split(/\s+/);
+      if (parts.length < 2) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Формат: /diamondto <username|ID> <кількість>' });
+        return res.status(200).json({ ok: true });
+      }
+
+      const amount = parseInt(parts[1]);
+      if (!amount || amount <= 0) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Вкажи правильну кількість' });
+        return res.status(200).json({ ok: true });
+      }
+
+      const target = await resolveTargetUser(parts[0]);
+      if (!target) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: `❌ Користувача ${parts[0]} не знайдено (вкажи @username або числовий ID).` });
+        return res.status(200).json({ ok: true });
+      }
+
+      const targetChatId = target.id;
+
+      // Add pending diamonds
+      const existingGem = await redis('GET', `reward_gem:${targetChatId}`);
+      const currentGem = existingGem?.result ? parseInt(existingGem.result) : 0;
+      await redis('SET', `reward_gem:${targetChatId}`, String(currentGem + amount));
+
+      // Notify the user
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: Number(targetChatId),
+        text: `💎 Тобі нараховано *+${amount}* алмазів від адміна!\nЗайди в гру щоб отримати.`,
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [[{ text: '🫓 Забрати алмази!', web_app: { url: WEBAPP_URL } }]],
+        },
+      });
+
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: `✅ Нараховано *+${amount}* 💎 алмазів для ${target.display}!`,
+        parse_mode: 'Markdown',
+      });
+      return res.status(200).json({ ok: true });
+    }
+
+    // /diamond <amount> — give diamonds to yourself
+    if (
+      (cmd.startsWith('/diamond ') || cmd.startsWith('diamond ') ||
+       cmd.startsWith('/diamonds ') || cmd.startsWith('diamonds ') ||
+       cmd.startsWith('/gem ') || cmd.startsWith('gem ') ||
+       cmd.startsWith('/gems ') || cmd.startsWith('gems ')) &&
+      !cmd.includes('to')
+    ) {
+      const amount = parseInt(text.replace(/^\/?(diamonds?|gems?)\s+/i, '').trim());
+      if (!amount || amount <= 0) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Вкажи кількість: /diamond <число>' });
+        return res.status(200).json({ ok: true });
+      }
+
+      // Get existing pending diamonds and add
+      const existing = await redis('GET', `reward_gem:${chatId}`);
+      const currentGem = existing?.result ? parseInt(existing.result) : 0;
+      await redis('SET', `reward_gem:${chatId}`, String(currentGem + amount));
+
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: `✅ Нараховано *+${amount}* 💎 алмазів тобі!\n💎 Зайди в гру щоб отримати.`,
+        parse_mode: 'Markdown',
+      });
+      return res.status(200).json({ ok: true });
+    }
+
     // /check <username|ID>
     if (cmd.startsWith('/check ') || cmd.startsWith('check ')) {
       const targetArg = text.replace(/^\/?check\s+/i, '').trim();
@@ -3425,6 +3702,7 @@ module.exports = async function handler(req, res) {
       const userData = await redis('HGET', 'users', targetChatId);
       const pending = await redis('GET', `reward:${targetChatId}`);
       const pendingRb = await redis('GET', `rebirth:${targetChatId}`);
+      const pendingGem = await redis('GET', `reward_gem:${targetChatId}`);
 
       let info = `👤 *${target.display}*\nID: \`${targetChatId}\`\n`;
       if (userData?.result) {
@@ -3436,6 +3714,9 @@ module.exports = async function handler(req, res) {
       }
       if (pending?.result && parseInt(pending.result) > 0) {
         info += `🎁 Очікує нагорода: ${parseInt(pending.result).toLocaleString()} фокач\n`;
+      }
+      if (pendingGem?.result && parseInt(pendingGem.result) > 0) {
+        info += `💎 Очікується алмазів: +${parseInt(pendingGem.result)} 💎\n`;
       }
       if (pendingRb?.result && parseInt(pendingRb.result) > 0) {
         info += `🔄 Очікується ребіртхів: ${parseInt(pendingRb.result)}\n`;
