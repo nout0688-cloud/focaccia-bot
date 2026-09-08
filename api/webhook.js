@@ -515,6 +515,7 @@ module.exports = async function handler(req, res) {
           `👥 Користувачів: *${userCount}*\n\n` +
           `📋 *Команди:*\n` +
           `• \`/users\` — список всіх юзерів\n` +
+          `• \`/update_users\` — оновити юзернейми через Telegram API\n` +
           `• \`/broadcast <текст>\` — розсилка всім\n` +
           `• \`/give <кількість>\` — видати собі фокачі\n` +
           `• \`/giveto <username> <кількість>\` — видати комусь\n` +
@@ -555,7 +556,193 @@ module.exports = async function handler(req, res) {
         } catch { /* skip */ }
       }
 
-      await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: list, parse_mode: 'Markdown' });
+      if (list.length <= 3800) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: list, parse_mode: 'Markdown' });
+      } else {
+        const lines = list.split('\n');
+        let currentChunk = '';
+        for (const line of lines) {
+          if (currentChunk.length + line.length + 1 > 3500) {
+            await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: currentChunk, parse_mode: 'Markdown' });
+            currentChunk = line + '\n';
+          } else {
+            currentChunk += line + '\n';
+          }
+        }
+        if (currentChunk.trim()) {
+          await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: currentChunk, parse_mode: 'Markdown' });
+        }
+      }
+      return res.status(200).json({ ok: true });
+    }
+
+    // /update_users [username/id] — refresh usernames & names from Telegram API or leaderboard
+    if (
+      cmd.startsWith('/update_users') || cmd.startsWith('update_users') ||
+      cmd.startsWith('/update_user') || cmd.startsWith('update_user') ||
+      cmd.startsWith('/refresh_users') || cmd.startsWith('refresh_users') ||
+      cmd.startsWith('/sync_users') || cmd.startsWith('sync_users')
+    ) {
+      const arg = text.replace(/^\/?(update_users|update_user|refresh_users|sync_users)\s*/i, '').replace('@', '').trim();
+
+      const usersData = await redis('HGETALL', 'users');
+      const lbData = await redis('HGETALL', 'leaderboard');
+
+      const userMap = new Map();
+      if (usersData?.result) {
+        for (let i = 0; i < usersData.result.length; i += 2) {
+          const id = String(usersData.result[i]);
+          let obj = {};
+          try { obj = JSON.parse(usersData.result[i + 1]); } catch { /* */ }
+          userMap.set(id, obj);
+        }
+      }
+
+      const lbMap = new Map();
+      if (lbData?.result) {
+        for (let i = 0; i < lbData.result.length; i += 2) {
+          const id = String(lbData.result[i]);
+          let obj = {};
+          try { obj = JSON.parse(lbData.result[i + 1]); } catch { /* */ }
+          lbMap.set(id, obj);
+          if (!userMap.has(id)) {
+            userMap.set(id, { name: obj.n || 'Гравець', username: obj.u || '', lastActive: obj.ts || Date.now() });
+          }
+        }
+      }
+
+      // If specific user requested
+      let targetIds = [];
+      if (arg) {
+        if (/^\d+$/.test(arg)) {
+          targetIds = [arg];
+        } else {
+          const tData = await redis('HGET', 'usernames', arg.toLowerCase());
+          if (tData?.result) {
+            targetIds = [String(tData.result)];
+          } else {
+            for (const [uid, uObj] of userMap.entries()) {
+              if (uObj.username && uObj.username.toLowerCase() === arg.toLowerCase()) {
+                targetIds = [uid];
+                break;
+              }
+            }
+          }
+          if (targetIds.length === 0) {
+            await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: `❌ Юзер @${arg} не знайдений у базі.` });
+            return res.status(200).json({ ok: true });
+          }
+        }
+      } else {
+        targetIds = Array.from(userMap.keys());
+      }
+
+      if (targetIds.length === 0) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '👥 Користувачів для оновлення не знайдено.' });
+        return res.status(200).json({ ok: true });
+      }
+
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: `⏳ Оновлюю дані для *${targetIds.length}* користувачів через Telegram API...`,
+        parse_mode: 'Markdown',
+      });
+
+      let updatedCount = 0;
+      let unchangedCount = 0;
+      let inaccessibleCount = 0;
+      const changes = [];
+
+      const batchSize = 8;
+      for (let i = 0; i < targetIds.length; i += batchSize) {
+        const batch = targetIds.slice(i, i + batchSize);
+        await Promise.all(batch.map(async (id) => {
+          const current = userMap.get(id) || {};
+          const oldUsername = current.username || '';
+          const oldName = current.name || '';
+          const lbEntry = lbMap.get(id);
+
+          let freshName = null;
+          let freshUsername = null;
+          let tgOk = false;
+
+          try {
+            const chatRes = await sendTg(TOKEN, 'getChat', { chat_id: Number(id) });
+            if (chatRes?.ok && chatRes.result) {
+              tgOk = true;
+              freshName = chatRes.result.first_name || '';
+              freshUsername = chatRes.result.username || '';
+            }
+          } catch { /* network error */ }
+
+          // Fallback if getChat failed, but leaderboard has fresh username
+          if (!tgOk && lbEntry && lbEntry.u) {
+            freshUsername = lbEntry.u;
+            freshName = lbEntry.n || oldName;
+          }
+
+          if (freshName === null && freshUsername === null) {
+            inaccessibleCount++;
+            return;
+          }
+
+          const hasUsernameChanged = freshUsername !== null && freshUsername !== oldUsername;
+          const hasNameChanged = freshName !== null && freshName !== oldName;
+
+          if (hasUsernameChanged || hasNameChanged) {
+            updatedCount++;
+            const finalUsername = freshUsername !== null ? freshUsername : oldUsername;
+            const finalName = freshName !== null ? freshName : oldName;
+
+            if (oldUsername && oldUsername.toLowerCase() !== finalUsername.toLowerCase()) {
+              await redis('HDEL', 'usernames', oldUsername.toLowerCase());
+            }
+            if (finalUsername) {
+              await redis('HSET', 'usernames', finalUsername.toLowerCase(), String(id));
+            }
+
+            const updatedUser = {
+              ...current,
+              name: finalName,
+              username: finalUsername,
+              lastActive: current.lastActive || Date.now(),
+            };
+            await redis('HSET', 'users', String(id), JSON.stringify(updatedUser));
+
+            if (lbEntry) {
+              lbEntry.n = finalName;
+              lbEntry.u = finalUsername;
+              await redis('HSET', 'leaderboard', String(id), JSON.stringify(lbEntry));
+            }
+
+            changes.push(`• ID \`${id}\`: ${oldName}${oldUsername ? ` (@${oldUsername})` : ''} ➔ *${finalName}*${finalUsername ? ` (@${finalUsername})` : ' (без юзернейму)'}`);
+          } else {
+            unchangedCount++;
+            if (oldUsername) {
+              await redis('HSET', 'usernames', oldUsername.toLowerCase(), String(id));
+            }
+          }
+        }));
+      }
+
+      let report = `✅ *Оновлення юзернеймів завершено!*\n\n` +
+        `👥 Перевірено: *${targetIds.length}*\n` +
+        `🔄 Оновлено: *${updatedCount}*\n` +
+        `⏺ Без змін: *${unchangedCount}*\n`;
+      if (inaccessibleCount > 0) {
+        report += `⚠️ Недоступно через API: *${inaccessibleCount}*\n`;
+      }
+
+      if (changes.length > 0) {
+        report += `\n📋 *Зміни:*\n` + changes.slice(0, 30).join('\n');
+        if (changes.length > 30) {
+          report += `\n…і ще ${changes.length - 30} юзерів`;
+        }
+      } else {
+        report += `\nУсі юзернейми в базі вже актуальні!`;
+      }
+
+      await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: report, parse_mode: 'Markdown' });
       return res.status(200).json({ ok: true });
     }
 

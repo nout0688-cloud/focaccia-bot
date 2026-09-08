@@ -160,8 +160,27 @@ module.exports = async function handler(req, res) {
 
       // Карма < 25 — «Тінь бабусі»: прогрес у лідерборді заморожено
       const frozen = karma < 25 && prev && typeof prev.t === 'number';
-      const storedTotal = frozen ? prev.t : total;
       await redis('HSET', 'leaderboard', userId, JSON.stringify({ n: name, u: username, t: storedTotal, p: prestige, k: clicks, ts: now }));
+
+      // Автоматичне оновлення users та usernames при звіті клієнта
+      try {
+        const uRaw = await redis('HGET', 'users', userId);
+        let uData = {};
+        if (uRaw?.result) {
+          try { uData = JSON.parse(uRaw.result); } catch { /* */ }
+        }
+        const oldUname = uData.username || '';
+        if (oldUname && oldUname.toLowerCase() !== username.toLowerCase()) {
+          await redis('HDEL', 'usernames', oldUname.toLowerCase());
+        }
+        if (username) {
+          await redis('HSET', 'usernames', username.toLowerCase(), userId);
+        }
+        uData.name = name;
+        uData.username = username;
+        uData.lastActive = now;
+        await redis('HSET', 'users', userId, JSON.stringify(uData));
+      } catch { /* skip */ }
 
       const rawFoc = body.focaccia !== undefined && body.focaccia !== null ? Math.max(0, Math.min(Number(body.focaccia) || 0, 1e24)) : null;
       const rawDia = body.diamonds !== undefined && body.diamonds !== null ? Math.max(0, Math.min(Number(body.diamonds) || 0, 1e9)) : null;
