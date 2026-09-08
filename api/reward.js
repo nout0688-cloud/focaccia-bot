@@ -50,6 +50,8 @@ module.exports = async function handler(req, res) {
       if (resetFlag?.result) await redis('DEL', `reset:${userId}`);
       await redis('DEL', `reward:${userId}`);
       await redis('DEL', `rebirth:${userId}`);
+      await redis('DEL', `reward_gem:${userId}`);
+      await redis('DEL', `reward_gem_source:${userId}`);
       return res.status(200).json({
         ok: true,
         reset: true,
@@ -71,6 +73,8 @@ module.exports = async function handler(req, res) {
 
     const gemData = await redis('GET', `reward_gem:${userId}`);
     const diamonds = gemData?.result ? parseInt(gemData.result) : 0;
+    const gemSourceData = await redis('GET', `reward_gem_source:${userId}`);
+    const gemSource = gemSourceData?.result || 'admin';
 
     const deductData = await redis('GET', `deduct:${userId}`);
     const deduct = deductData?.result ? parseInt(deductData.result) : 0;
@@ -79,9 +83,12 @@ module.exports = async function handler(req, res) {
       // Clear pending grants after claiming
       if (amount > 0) await redis('DEL', `reward:${userId}`);
       if (rebirths > 0) await redis('DEL', `rebirth:${userId}`);
-      if (diamonds > 0) await redis('DEL', `reward_gem:${userId}`);
+      if (diamonds > 0) {
+        await redis('DEL', `reward_gem:${userId}`);
+        await redis('DEL', `reward_gem_source:${userId}`);
+      }
       if (deduct > 0) await redis('DEL', `deduct:${userId}`);
-      return res.status(200).json({ ok: true, reward: amount, rebirth: rebirths, diamonds, deduct, karma });
+      return res.status(200).json({ ok: true, reward: amount, rebirth: rebirths, diamonds, gemSource, deduct, karma });
     }
 
     return res.status(200).json({ ok: true, reward: 0, karma });

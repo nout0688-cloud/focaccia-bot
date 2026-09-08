@@ -3,7 +3,7 @@
  * Webhook + Admin panel для user ID 1975429762
  */
 
-const WEBAPP_URL = 'https://nout0688-cloud.github.io/focaccia-clicker/?v=1.1.3';
+const WEBAPP_URL = 'https://nout0688-cloud.github.io/focaccia-clicker/?v=1.1.5';
 const ADMIN_ID = process.env.ADMIN_ID ? parseInt(process.env.ADMIN_ID, 10) : 1975429762;
 
 async function redis(...args) {
@@ -686,6 +686,7 @@ async function finishContest(TOKEN, contestId, force = false) {
       const gRaw = await redis('GET', `reward_gem:${wid}`);
       const gCur = gRaw?.result ? parseInt(gRaw.result, 10) : 0;
       await redis('SET', `reward_gem:${wid}`, String(gCur + contestObj.amount));
+      await redis('SET', `reward_gem_source:${wid}`, 'contest');
     } else if (contestObj.cur === 'rebirth') {
       const rRaw = await redis('GET', `rebirth:${wid}`);
       const rCur = rRaw?.result ? parseInt(rRaw.result, 10) : 0;
@@ -1819,6 +1820,7 @@ async function handleAdminAwaitInput(TOKEN, chatId, text, awaitData) {
     const existing = await redis('GET', `reward_gem:${chatId}`);
     const current = existing?.result ? parseInt(existing.result) : 0;
     await redis('SET', `reward_gem:${chatId}`, String(current + amt));
+    await redis('SET', `reward_gem_source:${chatId}`, 'admin');
 
     await sendTg(TOKEN, 'sendMessage', {
       chat_id: chatId,
@@ -1882,6 +1884,7 @@ async function handleAdminAwaitInput(TOKEN, chatId, text, awaitData) {
     const existing = await redis('GET', `reward_gem:${targetChatId}`);
     const current = existing?.result ? parseInt(existing.result) : 0;
     await redis('SET', `reward_gem:${targetChatId}`, String(current + amt));
+    await redis('SET', `reward_gem_source:${targetChatId}`, 'admin');
 
     await sendTg(TOKEN, 'sendMessage', {
       chat_id: Number(targetChatId),
@@ -1922,6 +1925,7 @@ async function handleAdminAwaitInput(TOKEN, chatId, text, awaitData) {
     const existing = await redis('GET', `reward_gem:${target.id}`);
     const current = existing?.result ? parseInt(existing.result) : 0;
     await redis('SET', `reward_gem:${target.id}`, String(current + amt));
+    await redis('SET', `reward_gem_source:${target.id}`, 'admin');
 
     await sendTg(TOKEN, 'sendMessage', {
       chat_id: Number(target.id),
@@ -2766,6 +2770,7 @@ module.exports = async function handler(req, res) {
           const ex = await redis('GET', `reward_gem:${cqChat}`);
           const curR = ex?.result ? parseInt(ex.result) : 0;
           await redis('SET', `reward_gem:${cqChat}`, String(curR + amt));
+          await redis('SET', `reward_gem_source:${cqChat}`, 'admin');
           if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
           await sendTg(TOKEN, 'sendMessage', {
             chat_id: cqChat,
@@ -2916,6 +2921,7 @@ module.exports = async function handler(req, res) {
         await redis('DEL', `reward:${targetId}`);
         await redis('DEL', `rebirth:${targetId}`);
         await redis('DEL', `reward_gem:${targetId}`);
+        await redis('DEL', `reward_gem_source:${targetId}`);
         await redis('DEL', `deduct:${targetId}`);
         const target = await resolveTargetUser(targetId);
         if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
@@ -2950,6 +2956,7 @@ module.exports = async function handler(req, res) {
         await redis('DEL', `reward:${targetId}`);
         await redis('DEL', `rebirth:${targetId}`);
         await redis('DEL', `reward_gem:${targetId}`);
+        await redis('DEL', `reward_gem_source:${targetId}`);
         await redis('DEL', `deduct:${targetId}`);
         await redis('HDEL', 'ac_karma', targetId);
         await redis('HDEL', 'ac_active', targetId);
@@ -3650,6 +3657,7 @@ module.exports = async function handler(req, res) {
       const existingGem = await redis('GET', `reward_gem:${targetChatId}`);
       const currentGem = existingGem?.result ? parseInt(existingGem.result) : 0;
       await redis('SET', `reward_gem:${targetChatId}`, String(currentGem + amount));
+      await redis('SET', `reward_gem_source:${targetChatId}`, 'admin');
 
       // Notify the user
       await sendTg(TOKEN, 'sendMessage', {
@@ -3687,6 +3695,7 @@ module.exports = async function handler(req, res) {
       const existing = await redis('GET', `reward_gem:${chatId}`);
       const currentGem = existing?.result ? parseInt(existing.result) : 0;
       await redis('SET', `reward_gem:${chatId}`, String(currentGem + amount));
+      await redis('SET', `reward_gem_source:${chatId}`, 'admin');
 
       await sendTg(TOKEN, 'sendMessage', {
         chat_id: chatId,
@@ -3750,7 +3759,9 @@ module.exports = async function handler(req, res) {
       }
       const targetChatId = target.id;
       await redis('DEL', `reward:${targetChatId}`);
+      await redis('DEL', `rebirth:${targetChatId}`);
       await redis('DEL', `reward_gem:${targetChatId}`);
+      await redis('DEL', `reward_gem_source:${targetChatId}`);
       await sendTg(TOKEN, 'sendMessage', {
         chat_id: chatId,
         text: `✅ Очікувані нагороди для ${target.display} повністю очищено!`,
