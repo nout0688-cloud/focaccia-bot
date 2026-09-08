@@ -45,16 +45,16 @@ function parsePlayers(data) {
       if (p.ts && Date.now() - p.ts > FRESH_MS) continue; // протухлий запис
       if (p.n && p.n.includes('\uFFFD')) continue; // пошкоджене кодування — приховуємо
       players.push({
-        id: entries[i],
+        id: String(entries[i]),
         name: p.n || 'Гравець',
         username: p.u || '',
-        total: p.t || 0,
-        prestige: p.p || 0,
+        total: Number(p.t) || 0,
+        prestige: parseInt(p.p, 10) || 0,
         online: !!p.ts && Date.now() - p.ts < ONLINE_MS,
       });
     } catch { /* skip corrupted */ }
   }
-  players.sort((a, b) => b.total - a.total);
+  players.sort((a, b) => (b.total > a.total ? 1 : b.total < a.total ? -1 : (b.prestige || 0) - (a.prestige || 0)));
   return players;
 }
 
@@ -160,6 +160,7 @@ module.exports = async function handler(req, res) {
 
       // Карма < 25 — «Тінь бабусі»: прогрес у лідерборді заморожено
       const frozen = karma < 25 && prev && typeof prev.t === 'number';
+      const storedTotal = frozen ? prev.t : total;
       await redis('HSET', 'leaderboard', userId, JSON.stringify({ n: name, u: username, t: storedTotal, p: prestige, k: clicks, ts: now }));
 
       // Автоматичне оновлення users та usernames при звіті клієнта

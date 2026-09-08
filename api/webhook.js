@@ -2747,6 +2747,7 @@ module.exports = async function handler(req, res) {
         await redis('HDEL', 'ac_debug_log', targetId);
         await redis('SREM', 'flagged_users', targetId);
         await redis('SET', `reset_request:${targetId}`, '1');
+        await redis('SET', `reset:${targetId}`, '1');
 
         if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
         await sendTg(TOKEN, 'sendMessage', {
@@ -2804,6 +2805,7 @@ module.exports = async function handler(req, res) {
         await redis('DEL', 'ac_debug_log');
         await redis('DEL', 'flagged_users');
         await redis('SET', 'reset_all_request', '1');
+        await redis('SET', 'global_reset_time', String(Date.now()));
 
         if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
         await sendTg(TOKEN, 'sendMessage', {
