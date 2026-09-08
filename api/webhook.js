@@ -337,7 +337,10 @@ function renderBuilderMessage(draft) {
       [{ text: `👥 Змінити переможців (${draft.winners || 3})`, callback_data: 'concurs:menu:winners' }],
       [{ text: `⏱ Змінити час (${formatDurationHours(draft.durationHours || 24)})`, callback_data: 'concurs:menu:duration' }],
       [{ text: '🚀 Опублікувати конкурс усім гравцям', callback_data: 'concurs:publish' }],
-      [{ text: '❌ Закрити білдер', callback_data: 'concurs:close' }],
+      [
+        { text: '⬅️ До адмінки', callback_data: 'admin:back' },
+        { text: '❌ Закрити білдер', callback_data: 'concurs:close' },
+      ],
     ],
   };
 
@@ -781,6 +784,1248 @@ async function checkExpiredContests(TOKEN) {
   } catch { /* ignore */ }
 }
 
+// ===== 👑 АДМІН-ПАНЕЛЬ: ДОПОМІЖНІ ФУНКЦІЇ ТА РЕНДЕРИ =====
+
+function parseAmountInput(raw) {
+  if (!raw) return 0;
+  const str = String(raw).trim().toLowerCase().replace(/[\s_,]/g, '');
+  if (str.endsWith('k') && !str.endsWith('kk') && !str.endsWith('kkk')) {
+    return Math.floor(parseFloat(str.slice(0, -1)) * 1000);
+  }
+  if (str.endsWith('kk') || str.endsWith('m')) {
+    const s = str.endsWith('kk') ? str.slice(0, -2) : str.slice(0, -1);
+    return Math.floor(parseFloat(s) * 1000000);
+  }
+  if (str.endsWith('kkk') || str.endsWith('b')) {
+    const s = str.endsWith('kkk') ? str.slice(0, -3) : str.slice(0, -1);
+    return Math.floor(parseFloat(s) * 1000000000);
+  }
+  const n = parseInt(str, 10);
+  return isNaN(n) ? 0 : n;
+}
+
+async function getAdminPanelMessage() {
+  const usersData = await redis('HGETALL', 'users');
+  const userCount = usersData?.result ? Math.floor(usersData.result.length / 2) : 0;
+  const totals = await redis('HGETALL', 'ac_total');
+  let flagCount = 0;
+  if (totals?.result) {
+    for (let i = 0; i < totals.result.length; i += 2) {
+      if (parseInt(totals.result[i + 1]) > 0) flagCount++;
+    }
+  }
+  const activeContestsData = await redis('SMEMBERS', 'active_contests');
+  const contestCount = activeContestsData?.result?.length || 0;
+
+  const text =
+    `👑 *ГОЛОВНА АДМІН ПАНЕЛЬ*\n\n` +
+    `👥 Гравців у базі: *${userCount}*\n` +
+    `⚠️ Детектів античиту: *${flagCount}*\n` +
+    `🎁 Активних конкурсів: *${contestCount}*\n\n` +
+    `👇 *Оберіть дію або розділ керування:*`;
+
+  const reply_markup = {
+    inline_keyboard: [
+      [
+        { text: '👥 Список гравців', callback_data: 'admin:users' },
+        { text: '🔄 Оновити юзерів', callback_data: 'admin:update_users' },
+      ],
+      [
+        { text: '🎁 Видати фокачі', callback_data: 'admin:menu:give' },
+        { text: '🔄 Видати ребіртхи', callback_data: 'admin:menu:rebirth' },
+      ],
+      [
+        { text: '🔍 Інфо про гравця', callback_data: 'admin:prompt:check' },
+        { text: '⚖️ Списати фокачі', callback_data: 'admin:prompt:take' },
+      ],
+      [
+        { text: '🛡 Античит та звіти', callback_data: 'admin:menu:anticheat' },
+        { text: '📢 Розсилка всім', callback_data: 'admin:prompt:broadcast' },
+      ],
+      [
+        { text: '🎉 Розіграші та конкурси', callback_data: 'admin:menu:contests' },
+        { text: '🏆 Очистити лідерборд', callback_data: 'admin:menu:lb_clear' },
+      ],
+      [
+        { text: '⚠️ Скидання акаунтів', callback_data: 'admin:menu:reset' },
+      ],
+      [
+        { text: '❌ Закрити панель', callback_data: 'admin:close' },
+      ],
+    ],
+  };
+
+  return { text, parse_mode: 'Markdown', reply_markup };
+}
+
+async function renderUsersList() {
+  const usersData = await redis('HGETALL', 'users');
+  if (!usersData?.result || usersData.result.length === 0) {
+    return {
+      text: '👥 Юзерів у базі поки немає.',
+      parse_mode: 'Markdown',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '🔄 Оновити юзерів (TG API)', callback_data: 'admin:update_users' }],
+          [{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }],
+        ],
+      },
+    };
+  }
+
+  const entries = usersData.result;
+  const userList = [];
+  for (let i = 0; i < entries.length; i += 2) {
+    const id = entries[i];
+    try {
+      const u = JSON.parse(entries[i + 1]);
+      userList.push({ id, ...u });
+    } catch {
+      userList.push({ id, name: id, username: '', lastActive: 0 });
+    }
+  }
+
+  userList.sort((a, b) => (b.lastActive || 0) - (a.lastActive || 0));
+
+  let text = `👥 *КОРИСТУВАЧІ БОТА* (Всього: *${userList.length}*)\n\n`;
+  const topUsers = userList.slice(0, 20);
+  for (const u of topUsers) {
+    const ago = Math.floor((Date.now() - (u.lastActive || Date.now())) / 60000);
+    const agoText = ago < 60 ? `${ago}хв` : ago < 1440 ? `${Math.floor(ago / 60)}г` : `${Math.floor(ago / 1440)}д`;
+    text += `• ${u.name}${u.username ? ` (@${u.username})` : ''} — \`${u.id}\` — ${agoText} тому\n`;
+  }
+  if (userList.length > 20) {
+    text += `\n…і ще ${userList.length - 20} гравців`;
+  }
+
+  const userButtons = [];
+  for (let i = 0; i < Math.min(topUsers.length, 6); i += 2) {
+    const row = [];
+    const u1 = topUsers[i];
+    row.push({ text: `👤 ${u1.username ? `@${u1.username}` : (u1.name || u1.id).slice(0, 14)}`, callback_data: `admin:check_user:${u1.id}` });
+    if (i + 1 < Math.min(topUsers.length, 6)) {
+      const u2 = topUsers[i + 1];
+      row.push({ text: `👤 ${u2.username ? `@${u2.username}` : (u2.name || u2.id).slice(0, 14)}`, callback_data: `admin:check_user:${u2.id}` });
+    }
+    userButtons.push(row);
+  }
+
+  const reply_markup = {
+    inline_keyboard: [
+      [
+        { text: '🔍 Перевірити юзера', callback_data: 'admin:prompt:check' },
+        { text: '🔄 Оновити юзернейми', callback_data: 'admin:update_users' },
+      ],
+      ...userButtons,
+      [
+        { text: '🔄 Оновити список', callback_data: 'admin:users' },
+        { text: '⬅️ Назад до адмінки', callback_data: 'admin:back' },
+      ],
+    ],
+  };
+
+  return { text, parse_mode: 'Markdown', reply_markup };
+}
+
+function renderGiveMenu() {
+  const text =
+    `🎁 *ВИДАЧА ФОКАЧ*\n\n` +
+    `Оберіть суму для швидкої видачі собі або введіть значення для будь-якого гравця:`;
+  const reply_markup = {
+    inline_keyboard: [
+      [
+        { text: '➕ Собі 10 млн 🫓', callback_data: 'admin:give_self:10000000' },
+        { text: '➕ Собі 100 млн 🫓', callback_data: 'admin:give_self:100000000' },
+      ],
+      [
+        { text: '➕ Собі 500 млн 🫓', callback_data: 'admin:give_self:500000000' },
+        { text: '➕ Собі 1 млрд 🫓', callback_data: 'admin:give_self:1000000000' },
+      ],
+      [
+        { text: '✍️ Ввести свою суму собі', callback_data: 'admin:prompt:give_self' },
+      ],
+      [
+        { text: '👤 Видати іншому гравцю (@ або ID)', callback_data: 'admin:prompt:giveto' },
+      ],
+      [
+        { text: '⬅️ Назад до адмінки', callback_data: 'admin:back' },
+      ],
+    ],
+  };
+  return { text, parse_mode: 'Markdown', reply_markup };
+}
+
+function renderRebirthMenu() {
+  const text =
+    `🔄 *ВИДАЧА РЕБІРТХІВ*\n\n` +
+    `Оберіть кількість ребіртхів для швидкої видачі собі або іншому гравцю:`;
+  const reply_markup = {
+    inline_keyboard: [
+      [
+        { text: '➕ Собі +1 🔄', callback_data: 'admin:rebirth_self:1' },
+        { text: '➕ Собі +2 🔄', callback_data: 'admin:rebirth_self:2' },
+        { text: '➕ Собі +5 🔄', callback_data: 'admin:rebirth_self:5' },
+      ],
+      [
+        { text: '➕ Собі +10 🔄', callback_data: 'admin:rebirth_self:10' },
+        { text: '➕ Собі +25 🔄', callback_data: 'admin:rebirth_self:25' },
+        { text: '➕ Собі +50 🔄', callback_data: 'admin:rebirth_self:50' },
+      ],
+      [
+        { text: '✍️ Ввести іншу кількість собі', callback_data: 'admin:prompt:rebirth_self' },
+      ],
+      [
+        { text: '👤 Видати іншому гравцю (@ або ID)', callback_data: 'admin:prompt:rebirthto' },
+      ],
+      [
+        { text: '⬅️ Назад до адмінки', callback_data: 'admin:back' },
+      ],
+    ],
+  };
+  return { text, parse_mode: 'Markdown', reply_markup };
+}
+
+async function renderAnticheatMenu() {
+  const totals = await redis('HGETALL', 'ac_total');
+  const usersData = await redis('HGETALL', 'users');
+
+  const names = {};
+  if (usersData?.result) {
+    for (let i = 0; i < usersData.result.length; i += 2) {
+      try {
+        const u = JSON.parse(usersData.result[i + 1]);
+        names[usersData.result[i]] = u.username ? `@${u.username}` : u.name;
+      } catch {}
+    }
+  }
+
+  const flagged = [];
+  if (totals?.result) {
+    for (let i = 0; i < totals.result.length; i += 2) {
+      const c = parseInt(totals.result[i + 1]) || 0;
+      if (c > 0) flagged.push({ id: totals.result[i], c });
+    }
+    flagged.sort((a, b) => b.c - a.c);
+  }
+
+  let text = `🛡 *АНТИЧИТ TAPSENTINEL v5*\n\n`;
+  text += `⚠️ Гравців з детектами: *${flagged.length}*\n\n`;
+
+  if (flagged.length > 0) {
+    text += `*Топ підозрілих:*\n`;
+    for (const f of flagged.slice(0, 5)) {
+      const who = names[f.id] || `\`${f.id}\``;
+      text += `• ${who} — *${f.c}* детектів\n`;
+    }
+    text += '\n';
+  } else {
+    text += `Чисто! Підозрілих гравців немає ✅\n\n`;
+  }
+
+  const reply_markup = {
+    inline_keyboard: [
+      [
+        { text: '📋 Повний звіт (Reports)', callback_data: 'admin:reports_view' },
+        { text: '📄 TXT дебаг-лог', callback_data: 'admin:prompt:aclog' },
+      ],
+      [
+        { text: '⚠️ Видати варн', callback_data: 'admin:prompt:warn' },
+        { text: '✅ Зняти варн (Unflag)', callback_data: 'admin:prompt:unflag' },
+      ],
+      [
+        { text: '⬅️ Назад до адмінки', callback_data: 'admin:back' },
+      ],
+    ],
+  };
+  return { text, parse_mode: 'Markdown', reply_markup };
+}
+
+async function renderReportsView() {
+  const totals = await redis('HGETALL', 'ac_total');
+  const active = await redis('HGETALL', 'ac_active');
+  const usersData = await redis('HGETALL', 'users');
+
+  const names = {};
+  if (usersData?.result) {
+    for (let i = 0; i < usersData.result.length; i += 2) {
+      try {
+        const u = JSON.parse(usersData.result[i + 1]);
+        names[usersData.result[i]] = u.username ? `@${u.username}` : u.name;
+      } catch {}
+    }
+  }
+
+  const activeIds = new Set();
+  if (active?.result) {
+    for (let i = 0; i < active.result.length; i += 2) activeIds.add(active.result[i]);
+  }
+
+  const karmaData = await redis('HGETALL', 'ac_karma');
+  const karmaMap = {};
+  if (karmaData?.result) {
+    for (let i = 0; i < karmaData.result.length; i += 2) {
+      try { karmaMap[karmaData.result[i]] = Math.max(0, Math.min(100, JSON.parse(karmaData.result[i + 1]).k || 0)); } catch {}
+    }
+  }
+
+  const flagged = [];
+  if (totals?.result) {
+    for (let i = 0; i < totals.result.length; i += 2) {
+      const c = parseInt(totals.result[i + 1]) || 0;
+      if (c > 0) flagged.push({ id: totals.result[i], c });
+    }
+    flagged.sort((a, b) => b.c - a.c);
+  }
+
+  let msg = '🛡 *TAPSENTINEL v5 — ЗВІТ*\n\n⚠️ *ДЕТЕКТИЛО:*\n';
+  if (flagged.length === 0) {
+    msg += 'поки нікого — усі чисті 👼\n';
+  } else {
+    flagged.slice(0, 15).forEach((f, i) => {
+      const who = names[f.id] || `\`${f.id}\``;
+      const liveMark = activeIds.has(f.id) ? ' 🔴' : '';
+      const km = karmaMap[f.id] ?? 100;
+      const zone = km < 25 ? '🔴' : km < 50 ? '⚠️' : km < 75 ? '🟡' : '🟢';
+      msg += `${i + 1}. ${who} — *${f.c}* раз(ів), карма *${km}/100* ${zone}${liveMark}\n`;
+    });
+    if (flagged.length > 15) msg += `…і ще ${flagged.length - 15}\n`;
+  }
+
+  const flaggedButtons = [];
+  for (let i = 0; i < Math.min(flagged.length, 6); i += 2) {
+    const row = [];
+    const f1 = flagged[i];
+    const who1 = (names[f1.id] || f1.id).slice(0, 14);
+    row.push({ text: `🔍 ${who1}`, callback_data: `admin:check_user:${f1.id}` });
+    if (i + 1 < Math.min(flagged.length, 6)) {
+      const f2 = flagged[i + 1];
+      const who2 = (names[f2.id] || f2.id).slice(0, 14);
+      row.push({ text: `🔍 ${who2}`, callback_data: `admin:check_user:${f2.id}` });
+    }
+    flaggedButtons.push(row);
+  }
+
+  const reply_markup = {
+    inline_keyboard: [
+      [
+        { text: '📄 TXT дебаг-лог юзера', callback_data: 'admin:prompt:aclog' },
+        { text: '✅ Зняти варн (Unflag)', callback_data: 'admin:prompt:unflag' },
+      ],
+      ...flaggedButtons,
+      [
+        { text: '🛡 До меню античиту', callback_data: 'admin:menu:anticheat' },
+        { text: '⬅️ Назад до адмінки', callback_data: 'admin:back' },
+      ],
+    ],
+  };
+
+  return { text: msg, parse_mode: 'Markdown', reply_markup };
+}
+
+async function renderContestsAdminMenu() {
+  const activeIds = (await redis('SMEMBERS', 'active_contests'))?.result || [];
+  let text = `🎁 *РОЗІГРАШІ ТА КОНКУРСИ*\n\n`;
+  text += `Активних конкурсів: *${activeIds.length}*\n\n`;
+
+  const contestButtons = [];
+  if (activeIds.length > 0) {
+    text += `*Список активних:*\n`;
+    for (const cId of activeIds) {
+      const raw = (await redis('HGET', 'contest:' + cId, 'data'))?.result;
+      if (raw) {
+        try {
+          const c = JSON.parse(raw);
+          const pCount = (await redis('SCARD', `contest_participants:${cId}`))?.result || 0;
+          const prize = formatContestCur(c.cur, c.amount);
+          text += `• *#${cId}*: ${prize} для ${c.winners} перем. (учасників: *${pCount}*)\n`;
+          contestButtons.push([
+            { text: `⚙️ Завершити #${cId.slice(-6)}`, callback_data: `admin:concurs_finish:${cId}` },
+            { text: `❌ Скасувати #${cId.slice(-6)}`, callback_data: `admin:concurs_cancel:${cId}` },
+          ]);
+        } catch {}
+      }
+    }
+    text += '\n';
+  } else {
+    text += `Наразі немає активних розіграшів.\n\n`;
+  }
+
+  const reply_markup = {
+    inline_keyboard: [
+      [{ text: '➕ Створити новий конкурс (Білдер)', callback_data: 'admin:open_concurs' }],
+      ...contestButtons,
+      [{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }],
+    ],
+  };
+  return { text, parse_mode: 'Markdown', reply_markup };
+}
+
+function renderLbClearConfirm() {
+  const text =
+    `🏆 *ОЧИЩЕННЯ ЛІДЕРБОРДУ*\n\n` +
+    `⚠️ Ви дійсно бажаєте повністю очистити таблицю лідерів?\n` +
+    `Це видалить записи рейтингу та історію детекцій.`;
+  const reply_markup = {
+    inline_keyboard: [
+      [{ text: '🗑 Так, очистити лідерборд!', callback_data: 'admin:lb_clear_exec' }],
+      [{ text: '⬅️ Скасувати / Назад', callback_data: 'admin:back' }],
+    ],
+  };
+  return { text, parse_mode: 'Markdown', reply_markup };
+}
+
+function renderResetMenu() {
+  const text =
+    `⚠️ *СКИДАННЯ АКАУНТІВ*\n\n` +
+    `Оберіть дію:\n` +
+    `• *Одного гравця* — скидає баланс, будівлі та престиж вказаного юзера\n` +
+    `• *ВСІХ гравців* — повне глобальне скидання всієї гри`;
+  const reply_markup = {
+    inline_keyboard: [
+      [{ text: '👤 Скинути одного гравця', callback_data: 'admin:prompt:reset_one' }],
+      [{ text: '💣 Скинути ВСІХ гравців (RESET ALL)', callback_data: 'admin:reset_all_confirm' }],
+      [{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }],
+    ],
+  };
+  return { text, parse_mode: 'Markdown', reply_markup };
+}
+
+function renderResetAllConfirm() {
+  const text =
+    `🚨 *УВАГА: ГЛОБАЛЬНЕ СКИДАННЯ ВСІХ АКАУНТІВ!*\n\n` +
+    `Це скине прогрес у ВСІХ зареєстрованих гравців гри!\n` +
+    `Цю дію НЕ можна буде скасувати!\n\n` +
+    `Ви точно впевнені?`;
+  const reply_markup = {
+    inline_keyboard: [
+      [{ text: '💣 ТАК, ТОЧНО СКИНУТИ ВСІХ ГРАВЦІВ!', callback_data: 'admin:reset_all_exec' }],
+      [{ text: '⬅️ Скасувати / Назад', callback_data: 'admin:back' }],
+    ],
+  };
+  return { text, parse_mode: 'Markdown', reply_markup };
+}
+
+async function renderUserCard(target) {
+  const uId = target.id;
+  const stateRaw = (await redis('GET', `save:${uId}`))?.result;
+  let s = null;
+  if (stateRaw) {
+    try { s = JSON.parse(stateRaw); } catch {}
+  }
+  const rewardRaw = (await redis('GET', `reward:${uId}`))?.result;
+  const pendingReward = rewardRaw ? parseInt(rewardRaw) : 0;
+  const rebirthRewardRaw = (await redis('GET', `rebirth:${uId}`))?.result;
+  const pendingRebirth = rebirthRewardRaw ? parseInt(rebirthRewardRaw) : 0;
+
+  const totalDetectsRaw = (await redis('HGET', 'ac_total', uId))?.result;
+  const totalDetects = totalDetectsRaw ? parseInt(totalDetectsRaw) : 0;
+  const kRaw = (await redis('HGET', 'ac_karma', uId))?.result;
+  let karma = 100;
+  if (kRaw) { try { karma = Math.max(0, Math.min(100, JSON.parse(kRaw).k || 0)); } catch {} }
+  const isFlagged = totalDetects > 0 || karma < 75;
+
+  let text = `👤 *КАРТКА ГРАВЦЯ*\n\n`;
+  text += `• Гравець: ${target.display}\n`;
+  text += `• Ім'я: *${target.name}*\n`;
+  text += `• ID: \`${uId}\`\n\n`;
+
+  if (s) {
+    text += `🫓 Баланс: *${formatNum(s.focaccia || 0)}*\n`;
+    text += `🌟 Загалом з'їдено: *${formatNum(s.total || 0)}*\n`;
+    text += `🔄 Престиж: *${s.prestige || 0}*\n`;
+    text += `💎 Алмази: *${s.diamonds || 0}*\n`;
+    text += `👆 Кліки: *${formatNum(s.clicks || 0)}*\n`;
+    text += `🛡 Карма: *${s.karma ?? karma}/100*\n`;
+  } else {
+    text += `ℹ️ Збереження клієнта поки немає в базі.\n`;
+  }
+
+  text += `⚠️ Античит: *${isFlagged ? `🔴 Є ПРАПОРЕЦЬ (детектів: ${totalDetects}, карма: ${karma})` : '🟢 Чистий'}*\n`;
+  if (pendingReward > 0) text += `🎁 Очікує нагороду: *${formatNum(pendingReward)}* 🫓\n`;
+  if (pendingRebirth > 0) text += `🔄 Очікує ребіртхи: *+${pendingRebirth}*\n`;
+
+  const reply_markup = {
+    inline_keyboard: [
+      [
+        { text: '🎁 Видати 🫓', callback_data: `admin:prompt:giveto_target:${uId}` },
+        { text: '🔄 Видати 🔄', callback_data: `admin:prompt:rebirthto_target:${uId}` },
+      ],
+      [
+        { text: '⚖️ Списати 🫓', callback_data: `admin:prompt:take_target:${uId}` },
+        { text: isFlagged ? '✅ Зняти варн' : '⚠️ Видати варн', callback_data: `admin:user_toggle_warn:${uId}` },
+      ],
+      [
+        { text: '📄 Дебаг-лог (TXT)', callback_data: `admin:user_aclog:${uId}` },
+        { text: '🧹 Очистити нагороду', callback_data: `admin:user_clearreward:${uId}` },
+      ],
+      [
+        { text: '🗑 Скинути акаунт', callback_data: `admin:user_reset_confirm:${uId}` },
+      ],
+      [
+        { text: '⬅️ Назад до адмінки', callback_data: 'admin:back' },
+      ],
+    ],
+  };
+  return { text, parse_mode: 'Markdown', reply_markup };
+}
+
+async function sendAcLogDocument(TOKEN, chatId, target) {
+  const targetChatId = target.id;
+  const targetUsername = target.username || targetChatId;
+
+  let karma = 100;
+  const kRaw = await redis('HGET', 'ac_karma', targetChatId);
+  if (kRaw?.result) { try { karma = Math.max(0, Math.min(100, JSON.parse(kRaw.result).k || 0)); } catch {} }
+
+  const totalRaw = await redis('HGET', 'ac_total', targetChatId);
+  const totalDetects = totalRaw?.result ? (parseInt(totalRaw.result) || 0) : 0;
+
+  let logs = [];
+  const logsRaw = await redis('HGET', 'ac_debug_log', targetChatId);
+  if (logsRaw?.result) { try { logs = JSON.parse(logsRaw.result); } catch { logs = []; } }
+
+  let strikes = [];
+  const sRaw = await redis('HGET', 'ac_strikes', targetChatId);
+  if (sRaw?.result) { try { strikes = JSON.parse(sRaw.result); } catch { strikes = []; } }
+
+  let txt = `=== TAPSENTINEL DEBUG LOG ===\n`;
+  txt += `Гравець: ${target.name} (${target.display})\n`;
+  txt += `ID: ${targetChatId}\n`;
+  txt += `Карма: ${karma}/100\n`;
+  txt += `Всього детектів: ${totalDetects}\n`;
+  txt += `Дата звіту: ${new Date().toISOString()}\n`;
+  txt += `\n=== СТРАЙКИ (timestamps) ===\n`;
+  if (strikes.length === 0) {
+    txt += `(немає)\n`;
+  } else {
+    strikes.forEach((ts, i) => {
+      txt += `  Strike ${i + 1}: ${new Date(ts).toISOString()}\n`;
+    });
+  }
+
+  txt += `\n=== ДЕБАГ ДЕТЕКТІВ (останні ${logs.length}) ===\n`;
+  if (logs.length === 0) {
+    txt += `(немає записів)\n`;
+  } else {
+    logs.forEach((entry, i) => {
+      txt += `\n--- Detect ${i + 1} ---\n`;
+      txt += `  Час: ${entry.ts ? new Date(entry.ts).toISOString() : 'N/A'}\n`;
+      txt += `  R (ритм):     ${entry.R ?? '?'}/100\n`;
+      txt += `  C (координати): ${entry.C ?? '?'}/100\n`;
+      txt += `  B (поведінка):  ${entry.B ?? '?'}/100\n`;
+      txt += `  H (людяність):  ${entry.H ?? '?'}/100\n`;
+      txt += `  Evidence:       ${entry.evidence ?? '?'}\n`;
+      txt += `  Suspicion:      ${entry.suspicion ?? '?'}\n`;
+      txt += `  Indep. signals: ${entry.independentSignals ?? '?'}\n`;
+      txt += `  Strong ratio:   ${entry.strongRatio ?? '?'}\n`;
+      txt += `  VStrong ratio:  ${entry.veryStrongRatio ?? '?'}\n`;
+      txt += `  Metronome:      ${entry.metronome ?? '?'}\n`;
+      txt += `  CV40:           ${entry.cv40 ?? '?'}\n`;
+      txt += `  ExtremeBoost:   ${entry.extremeSpeedBoost ?? '?'}\n`;
+      txt += `  Taps (40):      ${entry.taps40count ?? '?'}\n`;
+      txt += `  Taps (300):     ${entry.taps300count ?? '?'}\n`;
+      txt += `  Інтервали (мс): ${entry.ivs40 || 'N/A'}\n`;
+    });
+  }
+
+  const boundary = '----FormBoundary' + Date.now();
+  const fileName = `aclog_${targetUsername}_${Date.now()}.txt`;
+  const fileContent = Buffer.from(txt, 'utf-8');
+
+  const bodyParts = [
+    `--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${chatId}`,
+    `--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n🛡 Debug log для ${target.display}\nДетектів: ${totalDetects} | Карма: ${karma}/100`,
+    `--${boundary}\r\nContent-Disposition: form-data; name="document"; filename="${fileName}"\r\nContent-Type: text/plain\r\n\r\n`,
+  ];
+
+  const beforeFile = Buffer.from(bodyParts.join('\r\n') + '\r\n', 'utf-8');
+  const afterFile = Buffer.from(`\r\n--${boundary}--\r\n`, 'utf-8');
+  const fullBody = Buffer.concat([beforeFile, fileContent, afterFile]);
+
+  return fetch(`https://api.telegram.org/bot${TOKEN}/sendDocument`, {
+    method: 'POST',
+    headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
+    body: fullBody,
+  });
+}
+
+async function executeUpdateUsers(TOKEN, targetArg = '') {
+  const arg = (targetArg || '').replace('@', '').trim();
+
+  const usersData = await redis('HGETALL', 'users');
+  const lbData = await redis('HGETALL', 'leaderboard');
+
+  const userMap = new Map();
+  if (usersData?.result) {
+    for (let i = 0; i < usersData.result.length; i += 2) {
+      const id = String(usersData.result[i]);
+      let obj = {};
+      try { obj = JSON.parse(usersData.result[i + 1]); } catch { /* */ }
+      userMap.set(id, obj);
+    }
+  }
+
+  const lbMap = new Map();
+  if (lbData?.result) {
+    for (let i = 0; i < lbData.result.length; i += 2) {
+      const id = String(lbData.result[i]);
+      let obj = {};
+      try { obj = JSON.parse(lbData.result[i + 1]); } catch { /* */ }
+      lbMap.set(id, obj);
+      if (!userMap.has(id)) {
+        userMap.set(id, { name: obj.n || 'Гравець', username: obj.u || '', lastActive: obj.ts || Date.now() });
+      }
+    }
+  }
+
+  let targetIds = [];
+  if (arg) {
+    if (/^\d+$/.test(arg)) {
+      targetIds = [arg];
+    } else {
+      const tData = await redis('HGET', 'usernames', arg.toLowerCase());
+      if (tData?.result) {
+        targetIds = [String(tData.result)];
+      } else {
+        for (const [uid, uObj] of userMap.entries()) {
+          if (uObj.username && uObj.username.toLowerCase() === arg.toLowerCase()) {
+            targetIds = [uid];
+            break;
+          }
+        }
+      }
+      if (targetIds.length === 0) {
+        return `❌ Юзер @${arg} не знайдений у базі.`;
+      }
+    }
+  } else {
+    targetIds = Array.from(userMap.keys());
+  }
+
+  if (targetIds.length === 0) {
+    return '👥 Користувачів для оновлення не знайдено.';
+  }
+
+  let updatedCount = 0;
+  let unchangedCount = 0;
+  let inaccessibleCount = 0;
+  const changes = [];
+
+  const batchSize = 8;
+  for (let i = 0; i < targetIds.length; i += batchSize) {
+    const batch = targetIds.slice(i, i + batchSize);
+    await Promise.all(batch.map(async (id) => {
+      const current = userMap.get(id) || {};
+      const oldUsername = current.username || '';
+      const oldName = current.name || '';
+      const lbEntry = lbMap.get(id);
+
+      let freshName = null;
+      let freshUsername = null;
+      let tgOk = false;
+
+      try {
+        const chatRes = await sendTg(TOKEN, 'getChat', { chat_id: Number(id) });
+        if (chatRes?.ok && chatRes.result) {
+          tgOk = true;
+          freshName = chatRes.result.first_name || '';
+          freshUsername = chatRes.result.username || '';
+        }
+      } catch { /* network error */ }
+
+      if (!tgOk && lbEntry && lbEntry.u) {
+        freshUsername = lbEntry.u;
+        freshName = lbEntry.n || oldName;
+      }
+
+      if (freshName === null && freshUsername === null) {
+        inaccessibleCount++;
+        return;
+      }
+
+      const hasUsernameChanged = freshUsername !== null && freshUsername !== oldUsername;
+      const hasNameChanged = freshName !== null && freshName !== oldName;
+
+      if (hasUsernameChanged || hasNameChanged) {
+        updatedCount++;
+        const finalUsername = freshUsername !== null ? freshUsername : oldUsername;
+        const finalName = freshName !== null ? freshName : oldName;
+
+        if (oldUsername && oldUsername.toLowerCase() !== finalUsername.toLowerCase()) {
+          await redis('HDEL', 'usernames', oldUsername.toLowerCase());
+        }
+        if (finalUsername) {
+          await redis('HSET', 'usernames', finalUsername.toLowerCase(), String(id));
+        }
+
+        const updatedUser = {
+          ...current,
+          name: finalName,
+          username: finalUsername,
+          lastActive: current.lastActive || Date.now(),
+        };
+        await redis('HSET', 'users', String(id), JSON.stringify(updatedUser));
+
+        if (lbEntry) {
+          lbEntry.n = finalName;
+          lbEntry.u = finalUsername;
+          await redis('HSET', 'leaderboard', String(id), JSON.stringify(lbEntry));
+        }
+
+        changes.push(`• ID \`${id}\`: ${oldName}${oldUsername ? ` (@${oldUsername})` : ''} ➔ *${finalName}*${finalUsername ? ` (@${finalUsername})` : ' (без юзернейму)'}`);
+      } else {
+        unchangedCount++;
+        if (oldUsername) {
+          await redis('HSET', 'usernames', oldUsername.toLowerCase(), String(id));
+        }
+      }
+    }));
+  }
+
+  let report = `✅ *Оновлення юзернеймів завершено!*\n\n` +
+    `👥 Перевірено: *${targetIds.length}*\n` +
+    `🔄 Оновлено: *${updatedCount}*\n` +
+    `⏺ Без змін: *${unchangedCount}*\n`;
+  if (inaccessibleCount > 0) {
+    report += `⚠️ Недоступно через API: *${inaccessibleCount}*\n`;
+  }
+
+  if (changes.length > 0) {
+    report += `\n📋 *Зміни:*\n` + changes.slice(0, 30).join('\n');
+    if (changes.length > 30) {
+      report += `\n…і ще ${changes.length - 30} юзерів`;
+    }
+  } else {
+    report += `\nУсі юзернейми в базі вже актуальні!`;
+  }
+
+  return report;
+}
+
+async function handleAdminAwaitInput(TOKEN, chatId, text, awaitData) {
+  const action = awaitData?.action;
+  const targetId = awaitData?.targetId;
+
+  if (text.startsWith('/') && text !== '/cancel') {
+    // allow slash commands
+  }
+
+  if (action === 'give_self') {
+    const amt = parseAmountInput(text);
+    if (!amt || amt <= 0) {
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: '❌ Некоректна сума. Вкажіть число (наприклад: 50000000 або 50m):',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '✍️ Спробувати ще раз', callback_data: 'admin:prompt:give_self' }],
+            [{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }],
+          ],
+        },
+      });
+      return;
+    }
+    const existing = await redis('GET', `reward:${chatId}`);
+    const current = existing?.result ? parseInt(existing.result) : 0;
+    await redis('SET', `reward:${chatId}`, String(current + amt));
+
+    await sendTg(TOKEN, 'sendMessage', {
+      chat_id: chatId,
+      text: `✅ Нараховано *${amt.toLocaleString()}* фокач тобі!\n🫓 Зайди в гру щоб отримати.`,
+      parse_mode: 'Markdown',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '🎁 Видати ще', callback_data: 'admin:menu:give' }],
+          [{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }],
+        ],
+      },
+    });
+    return;
+  }
+
+  if (action === 'giveto') {
+    const parts = text.split(/\s+/);
+    if (parts.length < 2) {
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: '❌ Формат: `@username 50000000` або `1975429762 50m`',
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '✍️ Спробувати ще раз', callback_data: 'admin:prompt:giveto' }],
+            [{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }],
+          ],
+        },
+      });
+      return;
+    }
+    const target = await resolveTargetUser(parts[0]);
+    if (!target) {
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: `❌ Користувача ${parts[0]} не знайдено (вкажи @username або ID).`,
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '✍️ Спробувати ще раз', callback_data: 'admin:prompt:giveto' }],
+            [{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }],
+          ],
+        },
+      });
+      return;
+    }
+    const amt = parseAmountInput(parts[1]);
+    if (!amt || amt <= 0) {
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: '❌ Некоректна кількість фокач.',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '✍️ Спробувати ще раз', callback_data: 'admin:prompt:giveto' }],
+            [{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }],
+          ],
+        },
+      });
+      return;
+    }
+    const targetChatId = target.id;
+    const existing = await redis('GET', `reward:${targetChatId}`);
+    const current = existing?.result ? parseInt(existing.result) : 0;
+    await redis('SET', `reward:${targetChatId}`, String(current + amt));
+
+    await sendTg(TOKEN, 'sendMessage', {
+      chat_id: Number(targetChatId),
+      text: `🎁 Тобі нараховано *${amt.toLocaleString()}* фокач від адміна!\n🫓 Зайди в гру щоб отримати.`,
+      parse_mode: 'Markdown',
+      reply_markup: {
+        inline_keyboard: [[{ text: '🫓 Забрати нагороду!', web_app: { url: WEBAPP_URL } }]],
+      },
+    });
+
+    await sendTg(TOKEN, 'sendMessage', {
+      chat_id: chatId,
+      text: `✅ Нараховано *${amt.toLocaleString()}* фокач для ${target.display}!`,
+      parse_mode: 'Markdown',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '👤 Відкрити картку гравця', callback_data: `admin:check_user:${targetChatId}` }],
+          [{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }],
+        ],
+      },
+    });
+    return;
+  }
+
+  if (action === 'giveto_target') {
+    const target = await resolveTargetUser(targetId);
+    const amt = parseAmountInput(text);
+    if (!amt || amt <= 0 || !target) {
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: '❌ Некоректна сума.',
+        reply_markup: {
+          inline_keyboard: [[{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }]],
+        },
+      });
+      return;
+    }
+    const existing = await redis('GET', `reward:${target.id}`);
+    const current = existing?.result ? parseInt(existing.result) : 0;
+    await redis('SET', `reward:${target.id}`, String(current + amt));
+
+    await sendTg(TOKEN, 'sendMessage', {
+      chat_id: Number(target.id),
+      text: `🎁 Тобі нараховано *${amt.toLocaleString()}* фокач від адміна!\n🫓 Зайди в гру щоб отримати.`,
+      parse_mode: 'Markdown',
+      reply_markup: {
+        inline_keyboard: [[{ text: '🫓 Забрати нагороду!', web_app: { url: WEBAPP_URL } }]],
+      },
+    });
+
+    const card = await renderUserCard(target);
+    await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, ...card });
+    return;
+  }
+
+  if (action === 'rebirth_self') {
+    const amt = parseAmountInput(text);
+    if (!amt || amt <= 0) {
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: '❌ Некоректна кількість ребіртхів.',
+        reply_markup: {
+          inline_keyboard: [[{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }]],
+        },
+      });
+      return;
+    }
+    const existing = await redis('GET', `rebirth:${chatId}`);
+    const current = existing?.result ? parseInt(existing.result) : 0;
+    await redis('SET', `rebirth:${chatId}`, String(current + amt));
+
+    await sendTg(TOKEN, 'sendMessage', {
+      chat_id: chatId,
+      text: `✅ Нараховано *+${amt}* ребіртх(ів) тобі!\n🔄 Зайди в гру щоб отримати.`,
+      parse_mode: 'Markdown',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '🔄 Видати ще', callback_data: 'admin:menu:rebirth' }],
+          [{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }],
+        ],
+      },
+    });
+    return;
+  }
+
+  if (action === 'rebirthto') {
+    const parts = text.split(/\s+/);
+    if (parts.length < 2) {
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: '❌ Формат: `@username 5` або `1975429762 10`',
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [[{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }]],
+        },
+      });
+      return;
+    }
+    const target = await resolveTargetUser(parts[0]);
+    const amt = parseAmountInput(parts[1]);
+    if (!target || !amt || amt <= 0) {
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: '❌ Користувача або кількість не розпізнано.',
+        reply_markup: {
+          inline_keyboard: [[{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }]],
+        },
+      });
+      return;
+    }
+    const existing = await redis('GET', `rebirth:${target.id}`);
+    const current = existing?.result ? parseInt(existing.result) : 0;
+    await redis('SET', `rebirth:${target.id}`, String(current + amt));
+
+    await sendTg(TOKEN, 'sendMessage', {
+      chat_id: Number(target.id),
+      text: `🔄 Тобі нараховано *+${amt}* ребіртх(ів) від адміна!\nЗайди в гру щоб отримати.`,
+      parse_mode: 'Markdown',
+      reply_markup: {
+        inline_keyboard: [[{ text: '🫓 Забрати ребіртхи!', web_app: { url: WEBAPP_URL } }]],
+      },
+    });
+
+    await sendTg(TOKEN, 'sendMessage', {
+      chat_id: chatId,
+      text: `✅ Нараховано *+${amt}* ребіртх(ів) для ${target.display}!`,
+      parse_mode: 'Markdown',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '👤 Відкрити картку гравця', callback_data: `admin:check_user:${target.id}` }],
+          [{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }],
+        ],
+      },
+    });
+    return;
+  }
+
+  if (action === 'rebirthto_target') {
+    const target = await resolveTargetUser(targetId);
+    const amt = parseAmountInput(text);
+    if (!amt || amt <= 0 || !target) {
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: '❌ Некоректна кількість.',
+        reply_markup: {
+          inline_keyboard: [[{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }]],
+        },
+      });
+      return;
+    }
+    const existing = await redis('GET', `rebirth:${target.id}`);
+    const current = existing?.result ? parseInt(existing.result) : 0;
+    await redis('SET', `rebirth:${target.id}`, String(current + amt));
+
+    await sendTg(TOKEN, 'sendMessage', {
+      chat_id: Number(target.id),
+      text: `🔄 Тобі нараховано *+${amt}* ребіртх(ів) від адміна!\nЗайди в гру щоб отримати.`,
+      parse_mode: 'Markdown',
+      reply_markup: {
+        inline_keyboard: [[{ text: '🫓 Забрати ребіртхи!', web_app: { url: WEBAPP_URL } }]],
+      },
+    });
+
+    const card = await renderUserCard(target);
+    await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, ...card });
+    return;
+  }
+
+  if (action === 'check') {
+    const target = await resolveTargetUser(text);
+    if (!target) {
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: `❌ Користувача \`${text}\` не знайдено в базі.`,
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '✍️ Спробувати іншого', callback_data: 'admin:prompt:check' }],
+            [{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }],
+          ],
+        },
+      });
+      return;
+    }
+    const card = await renderUserCard(target);
+    await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, ...card });
+    return;
+  }
+
+  if (action === 'take') {
+    const parts = text.split(/\s+/);
+    if (parts.length < 2) {
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: '❌ Формат: `@username 5000000` або `1975429762 5m`',
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [[{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }]],
+        },
+      });
+      return;
+    }
+    const target = await resolveTargetUser(parts[0]);
+    const amt = parseAmountInput(parts[1]);
+    if (!target || !amt || amt <= 0) {
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: '❌ Користувача або кількість не розпізнано.',
+        reply_markup: {
+          inline_keyboard: [[{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }]],
+        },
+      });
+      return;
+    }
+    await redis('DEL', `reward:${target.id}`);
+    const exDeduct = await redis('GET', `deduct:${target.id}`);
+    const curD = exDeduct?.result ? parseInt(exDeduct.result) : 0;
+    await redis('SET', `deduct:${target.id}`, String(curD + amt));
+
+    await sendTg(TOKEN, 'sendMessage', {
+      chat_id: chatId,
+      text: `✅ Встановлено списання *${amt.toLocaleString()}* фокач для ${target.display} при наступному вході!`,
+      parse_mode: 'Markdown',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '👤 Відкрити картку гравця', callback_data: `admin:check_user:${target.id}` }],
+          [{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }],
+        ],
+      },
+    });
+    return;
+  }
+
+  if (action === 'take_target') {
+    const target = await resolveTargetUser(targetId);
+    const amt = parseAmountInput(text);
+    if (!amt || amt <= 0 || !target) {
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: '❌ Некоректна кількість.',
+        reply_markup: {
+          inline_keyboard: [[{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }]],
+        },
+      });
+      return;
+    }
+    await redis('DEL', `reward:${target.id}`);
+    const exDeduct = await redis('GET', `deduct:${target.id}`);
+    const curD = exDeduct?.result ? parseInt(exDeduct.result) : 0;
+    await redis('SET', `deduct:${target.id}`, String(curD + amt));
+
+    const card = await renderUserCard(target);
+    await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, ...card });
+    return;
+  }
+
+  if (action === 'broadcast') {
+    const broadcastText = text.trim();
+    const usersData = await redis('HGETALL', 'users');
+    if (!usersData?.result) {
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: '❌ Немає юзерів у базі.',
+        reply_markup: {
+          inline_keyboard: [[{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }]],
+        },
+      });
+      return;
+    }
+    const entries = usersData.result;
+    let sent = 0, failed = 0;
+    for (let i = 0; i < entries.length; i += 2) {
+      const uid = entries[i];
+      try {
+        await sendTg(TOKEN, 'sendMessage', {
+          chat_id: Number(uid),
+          text: `📢 *Оголошення:*\n\n${broadcastText}`,
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [[{ text: '🫓 Грати!', web_app: { url: WEBAPP_URL } }]],
+          },
+        });
+        sent++;
+      } catch {
+        failed++;
+      }
+    }
+    await sendTg(TOKEN, 'sendMessage', {
+      chat_id: chatId,
+      text: `✅ Розсилка завершена!\n📨 Відправлено: *${sent}*\n❌ Помилок: *${failed}*`,
+      parse_mode: 'Markdown',
+      reply_markup: {
+        inline_keyboard: [[{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }]],
+      },
+    });
+    return;
+  }
+
+  if (action === 'aclog') {
+    const target = await resolveTargetUser(text);
+    if (!target) {
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: `❌ Користувача ${text} не знайдено.`,
+        reply_markup: {
+          inline_keyboard: [[{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }]],
+        },
+      });
+      return;
+    }
+    await sendAcLogDocument(TOKEN, chatId, target);
+    await sendTg(TOKEN, 'sendMessage', {
+      chat_id: chatId,
+      text: `📄 Дебаг-лог для ${target.display} сформовано та надіслано!`,
+      parse_mode: 'Markdown',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '👤 Картка гравця', callback_data: `admin:check_user:${target.id}` }],
+          [{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }],
+        ],
+      },
+    });
+    return;
+  }
+
+  if (action === 'warn') {
+    const target = await resolveTargetUser(text);
+    if (!target) {
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: `❌ Користувача ${text} не знайдено.`,
+        reply_markup: {
+          inline_keyboard: [[{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }]],
+        },
+      });
+      return;
+    }
+    const targetChatId = target.id;
+    let karma = 100;
+    const kRaw = await redis('HGET', 'ac_karma', targetChatId);
+    if (kRaw?.result) { try { karma = Math.max(0, Math.min(100, JSON.parse(kRaw.result).k || 0)); } catch {} }
+    karma = Math.max(0, karma - 15);
+    await redis('HSET', 'ac_karma', targetChatId, JSON.stringify({ k: karma, on: 0, ts: Date.now() }));
+    await redis('HINCRBY', 'ac_total', targetChatId, '1');
+    await redis('SADD', 'flagged_users', targetChatId);
+    if (karma < 50) await redis('HSET', 'ac_active', targetChatId, '1');
+
+    await sendTg(TOKEN, 'sendMessage', {
+      chat_id: chatId,
+      text: `⚠️ Знак видано для ${target.display}. Карма: *${karma}/100*.`,
+      parse_mode: 'Markdown',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '👤 Відкрити картку', callback_data: `admin:check_user:${targetChatId}` }],
+          [{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }],
+        ],
+      },
+    });
+    return;
+  }
+
+  if (action === 'unflag') {
+    const target = await resolveTargetUser(text);
+    if (!target) {
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: `❌ Користувача ${text} не знайдено.`,
+        reply_markup: {
+          inline_keyboard: [[{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }]],
+        },
+      });
+      return;
+    }
+    const targetChatId = target.id;
+    await redis('HSET', 'ac_karma', targetChatId, JSON.stringify({ k: 100, on: 0, ts: Date.now() }));
+    await redis('HDEL', 'ac_active', targetChatId);
+    await redis('HDEL', 'ac_total', targetChatId);
+    await redis('HDEL', 'ac_strikes', targetChatId);
+    await redis('HDEL', 'ac_debug_log', targetChatId);
+    await redis('SREM', 'flagged_users', targetChatId);
+
+    await sendTg(TOKEN, 'sendMessage', {
+      chat_id: chatId,
+      text: `✅ ${target.display} повністю прощений: карма відновлена до *100/100*, знак ⚠️ та всі обмеження знято!`,
+      parse_mode: 'Markdown',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '👤 Відкрити картку', callback_data: `admin:check_user:${targetChatId}` }],
+          [{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }],
+        ],
+      },
+    });
+    return;
+  }
+
+  if (action === 'reset_one') {
+    const target = await resolveTargetUser(text);
+    if (!target) {
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: `❌ Користувача ${text} не знайдено.`,
+        reply_markup: {
+          inline_keyboard: [[{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }]],
+        },
+      });
+      return;
+    }
+    await sendTg(TOKEN, 'sendMessage', {
+      chat_id: chatId,
+      text: `⚠️ *ПІДТВЕРДЖЕННЯ СКИДАННЯ АКАУНТУ*\n\nВи дійсно хочете скинути весь прогрес для ${target.display}?`,
+      parse_mode: 'Markdown',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '🗑 Так, скинути!', callback_data: `admin:user_reset_exec:${target.id}` }],
+          [{ text: '⬅️ Скасувати / Назад', callback_data: 'admin:back' }],
+        ],
+      },
+    });
+    return;
+  }
+
+  if (action === 'update_user') {
+    const report = await executeUpdateUsers(TOKEN, text);
+    await sendTg(TOKEN, 'sendMessage', {
+      chat_id: chatId,
+      text: report,
+      parse_mode: 'Markdown',
+      reply_markup: {
+        inline_keyboard: [[{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }]],
+      },
+    });
+    return;
+  }
+}
+
 module.exports = async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(200).json({ ok: true, msg: '🫓 Focaccia bot is alive!' });
@@ -1203,6 +2448,414 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: true });
     }
 
+    // ===== 👑 АДМІНКА: callback-кнопки =====
+    if (cq && typeof cq.data === 'string' && cq.data.startsWith('admin:')) {
+      const cqChat = cq.message?.chat?.id ?? cq.from.id;
+      const cqMsgId = cq.message?.message_id;
+      const parts = cq.data.split(':');
+      const action = parts[1];
+      const targetId = parts[2];
+
+      try {
+        await fetch(`https://api.telegram.org/bot${TOKEN}/answerCallbackQuery`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ callback_query_id: cq.id }),
+        });
+      } catch { /* ignore */ }
+
+      if (!isAdmin(cq.from.id)) {
+        return res.status(200).json({ ok: true });
+      }
+
+      // Закрити панель — просто видалити повідомлення
+      if (action === 'close') {
+        await redis('DEL', `admin_await:${cqChat}`);
+        if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+        return res.status(200).json({ ok: true });
+      }
+
+      // Повернутися до головного меню адмінки
+      if (action === 'back') {
+        await redis('DEL', `admin_await:${cqChat}`);
+        if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+        const panel = await getAdminPanelMessage();
+        await sendTg(TOKEN, 'sendMessage', { chat_id: cqChat, ...panel });
+        return res.status(200).json({ ok: true });
+      }
+
+      // Розділи головного меню (видаляємо попереднє повідомлення, шлемо вибране меню)
+      if (action === 'menu') {
+        const sub = parts[2];
+        await redis('DEL', `admin_await:${cqChat}`);
+        if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+
+        let menuData;
+        if (sub === 'give') menuData = renderGiveMenu();
+        else if (sub === 'rebirth') menuData = renderRebirthMenu();
+        else if (sub === 'anticheat') menuData = await renderAnticheatMenu();
+        else if (sub === 'contests') menuData = await renderContestsAdminMenu();
+        else if (sub === 'reset') menuData = renderResetMenu();
+        else if (sub === 'lb_clear') menuData = renderLbClearConfirm();
+        else menuData = await getAdminPanelMessage();
+
+        await sendTg(TOKEN, 'sendMessage', { chat_id: cqChat, ...menuData });
+        return res.status(200).json({ ok: true });
+      }
+
+      // Список юзерів
+      if (action === 'users') {
+        await redis('DEL', `admin_await:${cqChat}`);
+        if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+        const usersView = await renderUsersList();
+        await sendTg(TOKEN, 'sendMessage', { chat_id: cqChat, ...usersView });
+        return res.status(200).json({ ok: true });
+      }
+
+      // Оновлення юзернеймів через TG API
+      if (action === 'update_users') {
+        await redis('DEL', `admin_await:${cqChat}`);
+        if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+        const report = await executeUpdateUsers(TOKEN, '');
+        await sendTg(TOKEN, 'sendMessage', {
+          chat_id: cqChat,
+          text: report,
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '👥 До списку гравців', callback_data: 'admin:users' }],
+              [{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }],
+            ],
+          },
+        });
+        return res.status(200).json({ ok: true });
+      }
+
+      // Видача фокач собі (готові пресети)
+      if (action === 'give_self') {
+        const amt = parseInt(parts[2], 10);
+        if (amt && amt > 0) {
+          const ex = await redis('GET', `reward:${cqChat}`);
+          const curR = ex?.result ? parseInt(ex.result) : 0;
+          await redis('SET', `reward:${cqChat}`, String(curR + amt));
+          await redis('DEL', `deduct:${cqChat}`);
+          if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+          await sendTg(TOKEN, 'sendMessage', {
+            chat_id: cqChat,
+            text: `✅ Видано *${amt.toLocaleString()}* фокач! Зайдіть у гру, щоб забрати.`,
+            parse_mode: 'Markdown',
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '🫓 Відкрити гру', web_app: { url: WEBAPP_URL } }],
+                [{ text: '🎁 Видати ще', callback_data: 'admin:menu:give' }],
+                [{ text: '⬅️ Головне меню', callback_data: 'admin:back' }],
+              ],
+            },
+          });
+        }
+        return res.status(200).json({ ok: true });
+      }
+
+      // Видача ребіртхів собі (готові пресети)
+      if (action === 'rebirth_self') {
+        const amt = parseInt(parts[2], 10);
+        if (amt && amt > 0) {
+          const ex = await redis('GET', `rebirth:${cqChat}`);
+          const curR = ex?.result ? parseInt(ex.result) : 0;
+          await redis('SET', `rebirth:${cqChat}`, String(curR + amt));
+          if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+          await sendTg(TOKEN, 'sendMessage', {
+            chat_id: cqChat,
+            text: `✅ Видано *+${amt}* ребіртх(ів)! Зайдіть у гру, щоб отримати.`,
+            parse_mode: 'Markdown',
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '🫓 Відкрити гру', web_app: { url: WEBAPP_URL } }],
+                [{ text: '🔄 Видати ще', callback_data: 'admin:menu:rebirth' }],
+                [{ text: '⬅️ Головне меню', callback_data: 'admin:back' }],
+              ],
+            },
+          });
+        }
+        return res.status(200).json({ ok: true });
+      }
+
+      // Запит текстового введення від адміна (prompts)
+      if (action === 'prompt') {
+        const promptType = parts[2];
+        const arg1 = parts[3];
+        if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+
+        let promptText = '';
+        let targetUser = null;
+        if (arg1) {
+          targetUser = await resolveTargetUser(arg1);
+        }
+
+        if (promptType === 'give_self') {
+          promptText = '✍️ *Введіть суму фокач для видачі собі:*\n(Можна вказувати `10m`, `500k`, `1b`, `50 000 000`)';
+        } else if (promptType === 'rebirth_self') {
+          promptText = '✍️ *Введіть кількість ребіртхів для видачі собі:*\n(Наприклад: `5`, `10`, `25`)';
+        } else if (promptType === 'giveto') {
+          promptText = '✍️ *Видача фокач іншому гравцю*\nВведіть у форматі: `@username сума` або `ID сума`\nПриклад: `@durov 50m` або `1975429762 100000000`';
+        } else if (promptType === 'rebirthto') {
+          promptText = '✍️ *Видача ребіртхів іншому гравцю*\nВведіть у форматі: `@username кількість` або `ID кількість`\nПриклад: `@durov 10` або `1975429762 5`';
+        } else if (promptType === 'giveto_target') {
+          promptText = `✍️ *Видача фокач для ${targetUser?.display || arg1}:*\nВведіть кількість (наприклад: \`50m\`, \`100000000\`)`;
+        } else if (promptType === 'rebirthto_target') {
+          promptText = `✍️ *Видача ребіртхів для ${targetUser?.display || arg1}:*\nВведіть кількість (наприклад: \`5\`, \`20\`)`;
+        } else if (promptType === 'take_target') {
+          promptText = `✍️ *Списання фокач для ${targetUser?.display || arg1}:*\nВведіть кількість (наприклад: \`10000000\`)`;
+        } else if (promptType === 'take') {
+          promptText = '✍️ *Списання фокач у гравця*\nВведіть у форматі: `@username сума` або `ID сума`\nПриклад: `@durov 50000000`';
+        } else if (promptType === 'check') {
+          promptText = '✍️ *Введіть @username або числовий ID гравця для перегляду картки:*';
+        } else if (promptType === 'broadcast') {
+          promptText = '✍️ *Введіть текст розсилки всім зареєстрованим гравцям:*\n(Підтримується розмітка Markdown)';
+        } else if (promptType === 'aclog') {
+          promptText = '✍️ *Дебаг-лог античиту*\nВведіть @username або ID гравця для отримання TXT файлу:';
+        } else if (promptType === 'warn') {
+          promptText = '✍️ *Видача попередження ⚠️*\nВведіть @username або ID гравця:';
+        } else if (promptType === 'unflag') {
+          promptText = '✍️ *Зняття варну та очищення підозр*\nВведіть @username або ID гравця:';
+        } else if (promptType === 'reset_one') {
+          promptText = '✍️ *Скидання акаунту гравця*\nВведіть @username або ID гравця, якого потрібно скинути:';
+        }
+
+        const pSent = await sendTg(TOKEN, 'sendMessage', {
+          chat_id: cqChat,
+          text: promptText || '✍️ Введіть дані:',
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [[{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }]],
+          },
+        });
+        const promptMsgId = pSent?.result?.message_id || '1';
+        await redis('SET', `admin_await:${cqChat}`, JSON.stringify({
+          action: promptType,
+          targetId: arg1 || null,
+          promptMsgId,
+        }), 'EX', 300);
+        return res.status(200).json({ ok: true });
+      }
+
+      // Картка гравця
+      if (action === 'check_user') {
+        const target = await resolveTargetUser(targetId);
+        if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+        if (!target) {
+          await sendTg(TOKEN, 'sendMessage', {
+            chat_id: cqChat,
+            text: `❌ Гравця \`${targetId}\` не знайдено.`,
+            parse_mode: 'Markdown',
+            reply_markup: {
+              inline_keyboard: [[{ text: '⬅️ Назад до списку', callback_data: 'admin:users' }]],
+            },
+          });
+          return res.status(200).json({ ok: true });
+        }
+        const card = await renderUserCard(target);
+        await sendTg(TOKEN, 'sendMessage', { chat_id: cqChat, ...card });
+        return res.status(200).json({ ok: true });
+      }
+
+      // Зняти / видати варн з картки
+      if (action === 'user_toggle_warn') {
+        const targetChatId = targetId;
+        const totalRaw = await redis('HGET', 'ac_total', targetChatId);
+        const totalDetects = totalRaw?.result ? (parseInt(totalRaw.result) || 0) : 0;
+        const kRaw = await redis('HGET', 'ac_karma', targetChatId);
+        let karma = 100;
+        if (kRaw?.result) { try { karma = Math.max(0, Math.min(100, JSON.parse(kRaw.result).k || 0)); } catch {} }
+        const isFlagged = totalDetects > 0 || karma < 75;
+
+        if (isFlagged) {
+          await redis('HSET', 'ac_karma', targetChatId, JSON.stringify({ k: 100, on: 0, ts: Date.now() }));
+          await redis('HDEL', 'ac_active', targetChatId);
+          await redis('HDEL', 'ac_total', targetChatId);
+          await redis('HDEL', 'ac_strikes', targetChatId);
+          await redis('HDEL', 'ac_debug_log', targetChatId);
+          await redis('SREM', 'flagged_users', targetChatId);
+        } else {
+          karma = Math.max(0, karma - 15);
+          await redis('HSET', 'ac_karma', targetChatId, JSON.stringify({ k: karma, on: 0, ts: Date.now() }));
+          await redis('HINCRBY', 'ac_total', targetChatId, '1');
+          await redis('SADD', 'flagged_users', targetChatId);
+          if (karma < 50) await redis('HSET', 'ac_active', targetChatId, '1');
+        }
+
+        const target = await resolveTargetUser(targetId);
+        if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+        if (target) {
+          const card = await renderUserCard(target);
+          await sendTg(TOKEN, 'sendMessage', { chat_id: cqChat, ...card });
+        }
+        return res.status(200).json({ ok: true });
+      }
+
+      // Дебаг-лог TXT файл
+      if (action === 'user_aclog') {
+        const target = await resolveTargetUser(targetId);
+        if (target) {
+          await sendAcLogDocument(TOKEN, cqChat, target);
+        }
+        return res.status(200).json({ ok: true });
+      }
+
+      // Очистити очікувані нагороди
+      if (action === 'user_clearreward') {
+        await redis('DEL', `reward:${targetId}`);
+        await redis('DEL', `rebirth:${targetId}`);
+        await redis('DEL', `deduct:${targetId}`);
+        const target = await resolveTargetUser(targetId);
+        if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+        if (target) {
+          const card = await renderUserCard(target);
+          await sendTg(TOKEN, 'sendMessage', { chat_id: cqChat, ...card });
+        }
+        return res.status(200).json({ ok: true });
+      }
+
+      // Скидання одного акаунту
+      if (action === 'user_reset_confirm') {
+        const target = await resolveTargetUser(targetId);
+        if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+        await sendTg(TOKEN, 'sendMessage', {
+          chat_id: cqChat,
+          text: `⚠️ *ПІДТВЕРДЖЕННЯ СКИДАННЯ АКАУНТУ*\n\nВи дійсно хочете скинути весь прогрес для ${target?.display || targetId}?`,
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🗑 Так, скинути!', callback_data: `admin:user_reset_exec:${targetId}` }],
+              [{ text: '⬅️ Скасувати', callback_data: `admin:check_user:${targetId}` }],
+            ],
+          },
+        });
+        return res.status(200).json({ ok: true });
+      }
+
+      if (action === 'user_reset_exec') {
+        await redis('HDEL', 'leaderboard', targetId);
+        await redis('DEL', `save:${targetId}`);
+        await redis('DEL', `reward:${targetId}`);
+        await redis('DEL', `rebirth:${targetId}`);
+        await redis('DEL', `deduct:${targetId}`);
+        await redis('HDEL', 'ac_karma', targetId);
+        await redis('HDEL', 'ac_active', targetId);
+        await redis('HDEL', 'ac_total', targetId);
+        await redis('HDEL', 'ac_strikes', targetId);
+        await redis('HDEL', 'ac_debug_log', targetId);
+        await redis('SREM', 'flagged_users', targetId);
+        await redis('SET', `reset_request:${targetId}`, '1');
+
+        if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+        await sendTg(TOKEN, 'sendMessage', {
+          chat_id: cqChat,
+          text: `✅ Акаунт \`${targetId}\` повністю скинуто! При наступному вході гра почнеться з нуля.`,
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [[{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }]],
+          },
+        });
+        return res.status(200).json({ ok: true });
+      }
+
+      // Звіт античиту
+      if (action === 'reports_view') {
+        if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+        const rep = await renderReportsView();
+        await sendTg(TOKEN, 'sendMessage', { chat_id: cqChat, ...rep });
+        return res.status(200).json({ ok: true });
+      }
+
+      // Очищення лідерборду
+      if (action === 'lb_clear_confirm') {
+        if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+        await sendTg(TOKEN, 'sendMessage', { chat_id: cqChat, ...renderLbClearConfirm() });
+        return res.status(200).json({ ok: true });
+      }
+
+      if (action === 'lb_clear_exec') {
+        await redis('DEL', 'leaderboard');
+        if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+        await sendTg(TOKEN, 'sendMessage', {
+          chat_id: cqChat,
+          text: '🏆 Лідерборд успішно очищено!',
+          reply_markup: {
+            inline_keyboard: [[{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }]],
+          },
+        });
+        return res.status(200).json({ ok: true });
+      }
+
+      // Скидання ВСІХ акаунтів
+      if (action === 'reset_all_confirm') {
+        if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+        await sendTg(TOKEN, 'sendMessage', { chat_id: cqChat, ...renderResetAllConfirm() });
+        return res.status(200).json({ ok: true });
+      }
+
+      if (action === 'reset_all_exec') {
+        await redis('DEL', 'leaderboard');
+        await redis('DEL', 'ac_karma');
+        await redis('DEL', 'ac_active');
+        await redis('DEL', 'ac_total');
+        await redis('DEL', 'ac_strikes');
+        await redis('DEL', 'ac_debug_log');
+        await redis('DEL', 'flagged_users');
+        await redis('SET', 'reset_all_request', '1');
+
+        if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+        await sendTg(TOKEN, 'sendMessage', {
+          chat_id: cqChat,
+          text: '💣 *ВСІ АКАУНТИ СКИНУТО!*\nЛідерборд і дані античиту також очищено.',
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [[{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }]],
+          },
+        });
+        return res.status(200).json({ ok: true });
+      }
+
+      // Відкрити білдер конкурсу з адмінки
+      if (action === 'open_concurs') {
+        if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+        const draft = await getContestDraft(cqChat);
+        await sendTg(TOKEN, 'sendMessage', { chat_id: cqChat, ...renderBuilderMessage(draft) });
+        return res.status(200).json({ ok: true });
+      }
+
+      // Дострокове завершення конкурсу
+      if (action === 'concurs_finish') {
+        const contestId = targetId;
+        if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+        await finishContest(TOKEN, contestId, true);
+        const menu = await renderContestsAdminMenu();
+        await sendTg(TOKEN, 'sendMessage', { chat_id: cqChat, ...menu });
+        return res.status(200).json({ ok: true });
+      }
+
+      // Скасування конкурсу
+      if (action === 'concurs_cancel') {
+        const contestId = targetId;
+        if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+        const cRaw = await redis('HGET', 'contest:' + contestId, 'data');
+        if (cRaw?.result) {
+          let cObj = {};
+          try { cObj = JSON.parse(cRaw.result); } catch {}
+          cObj.status = 'cancelled';
+          cObj.cancelledAt = Date.now();
+          await redis('HSET', 'contest:' + contestId, 'data', JSON.stringify(cObj));
+          await redis('SREM', 'active_contests', contestId);
+        }
+        const menu = await renderContestsAdminMenu();
+        await sendTg(TOKEN, 'sendMessage', { chat_id: cqChat, ...menu });
+        return res.status(200).json({ ok: true });
+      }
+
+      return res.status(200).json({ ok: true });
+    }
+
     const msg = update.message;
     if (!msg?.text) return res.status(200).json({ ok: true });
 
@@ -1283,6 +2936,34 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: true });
     }
 
+    // 👑 Очікування введення для адмінки
+    const adminAwaitRaw = await redis('GET', `admin_await:${chatId}`);
+    if (adminAwaitRaw?.result && isAdmin(userId)) {
+      let awaitData = null;
+      try { awaitData = JSON.parse(adminAwaitRaw.result); } catch {}
+      if (awaitData) {
+        await redis('DEL', `admin_await:${chatId}`);
+        const promptId = Number(awaitData.promptMsgId);
+
+        if (text === '/cancel' || text === 'скасувати' || text === 'отмена') {
+          if (promptId) await deleteTg(TOKEN, chatId, promptId);
+          if (msg.message_id) await deleteTg(TOKEN, chatId, msg.message_id);
+          const panel = await getAdminPanelMessage();
+          await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, ...panel });
+          return res.status(200).json({ ok: true });
+        }
+
+        if (text.startsWith('/')) {
+          if (promptId) await deleteTg(TOKEN, chatId, promptId);
+        } else {
+          if (promptId) await deleteTg(TOKEN, chatId, promptId);
+          if (msg.message_id) await deleteTg(TOKEN, chatId, msg.message_id);
+          await handleAdminAwaitInput(TOKEN, chatId, text, awaitData);
+          return res.status(200).json({ ok: true });
+        }
+      }
+    }
+
     const cmd = text.toLowerCase();
 
     // ===== /start =====
@@ -1336,41 +3017,13 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: true });
     }
 
-    // /admin — show panel
+    // /admin — show interactive button panel with message cleanup
     if (cmd === '/admin' || cmd === 'admin' || cmd === 'адмін' || cmd === 'админ') {
-      const usersData = await redis('HGETALL', 'users');
-      const userCount = usersData?.result ? Math.floor(usersData.result.length / 2) : 0;
-
-      await sendTg(TOKEN, 'sendMessage', {
-        chat_id: chatId,
-        text:
-          `👑 *АДМІН ПАНЕЛЬ*\n\n` +
-          `👥 Користувачів: *${userCount}*\n\n` +
-          `📋 *Команди (можна вказувати @username або ID):*\n` +
-          `• \`/users\` — список всіх юзерів\n` +
-          `• \`/update_users [юзер|ID]\` — оновити юзернейми через Telegram API\n` +
-          `• \`/broadcast <текст>\` — розсилка всім\n` +
-          `• \`/give <кількість>\` — видати собі фокачі\n` +
-          `• \`/giveto <юзер|ID> <кількість>\` — видати комусь\n` +
-          `• \`/rebirth <кількість>\` — видати собі ребіртхи\n` +
-          `• \`/rebirthto <юзер|ID> <кількість>\` — видати комусь ребіртхи\n` +
-          `• \`/check <юзер|ID>\` — інфо про юзера\n` +
-          `• \`/clearreward <юзер|ID>\` — очистити очікувану нагороду\n` +
-          `• \`/takefrom <юзер|ID> <кількість>\` — списати фокачі при вході\n` +
-          `• \`/lb_clear\` — очистити лідерборд\n` +
-          `• \`/reports\` — звіт античиту (хто детектило)\n` +
-          `• \`/aclog <юзер|ID>\` — дебаг-лог детектів (TXT файл)\n` +
-          `• \`/warn <юзер|ID>\` — видати знак ⚠️ вручну\n` +
-          `• \`/unflag <юзер|ID>\` — зняти знак ⚠️ з гравця\n` +
-          `• \`/reset <юзер|ID>\` — скинути акаунт юзера\n` +
-          `• \`/reset_all\` — скинути акаунти ВСІХ гравців\n\n` +
-          `🎁 *Розіграші та конкурси:*\n` +
-          `• \`/concurs\` — інтерактивний білдер конкурсу\n` +
-          `• \`/concurs_list\` — список активних розіграшів\n` +
-          `• \`/concurs_finish <ID>\` — достроково підбити підсумки\n` +
-          `• \`/concurs_cancel <ID>\` — скасувати розіграш`,
-        parse_mode: 'Markdown',
-      });
+      if (msg.message_id) {
+        await deleteTg(TOKEN, chatId, msg.message_id);
+      }
+      const panel = await getAdminPanelMessage();
+      await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, ...panel });
       return res.status(200).json({ ok: true });
     }
 
