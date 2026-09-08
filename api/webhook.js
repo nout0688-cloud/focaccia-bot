@@ -839,16 +839,16 @@ async function getAdminPanelMessage() {
         { text: '⚖️ Списати фокачі', callback_data: 'admin:prompt:take' },
       ],
       [
-        { text: '🔍 Інфо про гравця', callback_data: 'admin:prompt:check' },
+        { text: '🔍 Пошук гравця', callback_data: 'admin:prompt:check' },
         { text: '📢 Розсилка всім', callback_data: 'admin:prompt:broadcast' },
       ],
       [
-        { text: '🛡 Античит та звіти', callback_data: 'admin:menu:anticheat' },
-        { text: '🎉 Розіграші та конкурси', callback_data: 'admin:menu:contests' },
+        { text: '🛡 Античит', callback_data: 'admin:menu:anticheat' },
+        { text: '🎉 Конкурси', callback_data: 'admin:menu:contests' },
       ],
       [
-        { text: '🏆 Очистити лідерборд', callback_data: 'admin:menu:lb_clear' },
-        { text: '⚠️ Скидання акаунтів', callback_data: 'admin:menu:reset' },
+        { text: '🏆 Очистити топ', callback_data: 'admin:menu:lb_clear' },
+        { text: '⚠️ Скинути акаунт', callback_data: 'admin:menu:reset' },
       ],
       [
         { text: '❌ Закрити панель', callback_data: 'admin:close' },
@@ -931,22 +931,27 @@ async function renderUsersList() {
 function renderGiveMenu() {
   const text =
     `🎁 *ВИДАЧА ФОКАЧ*\n\n` +
-    `Оберіть суму для швидкої видачі собі або введіть значення для будь-якого гравця:`;
+    `👇 *Швидка видача собі (в один клік):*\n` +
+    `Оберіть готову суму або скористайтесь кнопками нижче:`;
   const reply_markup = {
     inline_keyboard: [
       [
-        { text: '➕ Собі 10 млн 🫓', callback_data: 'admin:give_self:10000000' },
-        { text: '➕ Собі 100 млн 🫓', callback_data: 'admin:give_self:100000000' },
+        { text: '+10 млн 🫓', callback_data: 'admin:give_self:10000000' },
+        { text: '+50 млн 🫓', callback_data: 'admin:give_self:50000000' },
       ],
       [
-        { text: '➕ Собі 500 млн 🫓', callback_data: 'admin:give_self:500000000' },
-        { text: '➕ Собі 1 млрд 🫓', callback_data: 'admin:give_self:1000000000' },
+        { text: '+100 млн 🫓', callback_data: 'admin:give_self:100000000' },
+        { text: '+500 млн 🫓', callback_data: 'admin:give_self:500000000' },
       ],
       [
-        { text: '✍️ Ввести свою суму собі', callback_data: 'admin:prompt:give_self' },
+        { text: '+1 млрд 🫓', callback_data: 'admin:give_self:1000000000' },
+        { text: '+5 млрд 🫓', callback_data: 'admin:give_self:5000000000' },
       ],
       [
-        { text: '👤 Видати іншому гравцю (@ або ID)', callback_data: 'admin:prompt:giveto' },
+        { text: '✍️ Своя сума собі', callback_data: 'admin:prompt:give_self' },
+      ],
+      [
+        { text: '👤 Видати гравцю (@ або ID)', callback_data: 'admin:prompt:giveto' },
       ],
       [
         { text: '⬅️ Назад до адмінки', callback_data: 'admin:back' },
@@ -959,24 +964,25 @@ function renderGiveMenu() {
 function renderRebirthMenu() {
   const text =
     `🔄 *ВИДАЧА РЕБІРТХІВ*\n\n` +
-    `Оберіть кількість ребіртхів для швидкої видачі собі або іншому гравцю:`;
+    `👇 *Швидка видача собі (в один клік):*\n` +
+    `Оберіть кількість або скористайтесь кнопками нижче:`;
   const reply_markup = {
     inline_keyboard: [
       [
-        { text: '➕ Собі +1 🔄', callback_data: 'admin:rebirth_self:1' },
-        { text: '➕ Собі +2 🔄', callback_data: 'admin:rebirth_self:2' },
-        { text: '➕ Собі +5 🔄', callback_data: 'admin:rebirth_self:5' },
+        { text: '+1 🔄', callback_data: 'admin:rebirth_self:1' },
+        { text: '+2 🔄', callback_data: 'admin:rebirth_self:2' },
+        { text: '+5 🔄', callback_data: 'admin:rebirth_self:5' },
       ],
       [
-        { text: '➕ Собі +10 🔄', callback_data: 'admin:rebirth_self:10' },
-        { text: '➕ Собі +25 🔄', callback_data: 'admin:rebirth_self:25' },
-        { text: '➕ Собі +50 🔄', callback_data: 'admin:rebirth_self:50' },
+        { text: '+10 🔄', callback_data: 'admin:rebirth_self:10' },
+        { text: '+25 🔄', callback_data: 'admin:rebirth_self:25' },
+        { text: '+50 🔄', callback_data: 'admin:rebirth_self:50' },
       ],
       [
-        { text: '✍️ Ввести іншу кількість собі', callback_data: 'admin:prompt:rebirth_self' },
+        { text: '✍️ Своя кількість собі', callback_data: 'admin:prompt:rebirth_self' },
       ],
       [
-        { text: '👤 Видати іншому гравцю (@ або ID)', callback_data: 'admin:prompt:rebirthto' },
+        { text: '👤 Видати гравцю (@ або ID)', callback_data: 'admin:prompt:rebirthto' },
       ],
       [
         { text: '⬅️ Назад до адмінки', callback_data: 'admin:back' },
@@ -989,24 +995,25 @@ function renderRebirthMenu() {
 function renderDiamondsMenu() {
   const text =
     `💎 *ВИДАЧА АЛМАЗІВ*\n\n` +
-    `Оберіть кількість алмазів для швидкої видачі собі або введіть значення для будь-якого гравця:`;
+    `👇 *Швидка видача собі (в один клік):*\n` +
+    `Оберіть кількість або скористайтесь кнопками нижче:`;
   const reply_markup = {
     inline_keyboard: [
       [
-        { text: '➕ Собі +10 💎', callback_data: 'admin:diamond_self:10' },
-        { text: '➕ Собі +25 💎', callback_data: 'admin:diamond_self:25' },
-        { text: '➕ Собі +50 💎', callback_data: 'admin:diamond_self:50' },
+        { text: '+10 💎', callback_data: 'admin:diamond_self:10' },
+        { text: '+25 💎', callback_data: 'admin:diamond_self:25' },
+        { text: '+50 💎', callback_data: 'admin:diamond_self:50' },
       ],
       [
-        { text: '➕ Собі +100 💎', callback_data: 'admin:diamond_self:100' },
-        { text: '➕ Собі +250 💎', callback_data: 'admin:diamond_self:250' },
-        { text: '➕ Собі +1000 💎', callback_data: 'admin:diamond_self:1000' },
+        { text: '+100 💎', callback_data: 'admin:diamond_self:100' },
+        { text: '+250 💎', callback_data: 'admin:diamond_self:250' },
+        { text: '+1,000 💎', callback_data: 'admin:diamond_self:1000' },
       ],
       [
-        { text: '✍️ Ввести іншу кількість собі', callback_data: 'admin:prompt:diamond_self' },
+        { text: '✍️ Своя кількість собі', callback_data: 'admin:prompt:diamond_self' },
       ],
       [
-        { text: '👤 Видати іншому гравцю (@ або ID)', callback_data: 'admin:prompt:diamondto' },
+        { text: '👤 Видати гравцю (@ або ID)', callback_data: 'admin:prompt:diamondto' },
       ],
       [
         { text: '⬅️ Назад до адмінки', callback_data: 'admin:back' },
@@ -1056,12 +1063,12 @@ async function renderAnticheatMenu() {
   const reply_markup = {
     inline_keyboard: [
       [
-        { text: '📋 Повний звіт (Reports)', callback_data: 'admin:reports_view' },
+        { text: '📋 Всі звіти', callback_data: 'admin:reports_view' },
         { text: '📄 TXT дебаг-лог', callback_data: 'admin:prompt:aclog' },
       ],
       [
         { text: '⚠️ Видати варн', callback_data: 'admin:prompt:warn' },
-        { text: '✅ Зняти варн (Unflag)', callback_data: 'admin:prompt:unflag' },
+        { text: '✅ Зняти варн', callback_data: 'admin:prompt:unflag' },
       ],
       [
         { text: '⬅️ Назад до адмінки', callback_data: 'admin:back' },
@@ -1139,12 +1146,12 @@ async function renderReportsView() {
   const reply_markup = {
     inline_keyboard: [
       [
-        { text: '📄 TXT дебаг-лог юзера', callback_data: 'admin:prompt:aclog' },
-        { text: '✅ Зняти варн (Unflag)', callback_data: 'admin:prompt:unflag' },
+        { text: '📄 TXT дебаг-лог', callback_data: 'admin:prompt:aclog' },
+        { text: '✅ Зняти варн', callback_data: 'admin:prompt:unflag' },
       ],
       ...flaggedButtons,
       [
-        { text: '🛡 До меню античиту', callback_data: 'admin:menu:anticheat' },
+        { text: '🛡 Меню античиту', callback_data: 'admin:menu:anticheat' },
         { text: '⬅️ Назад до адмінки', callback_data: 'admin:back' },
       ],
     ],
@@ -1281,19 +1288,19 @@ async function renderUserCard(target) {
   const reply_markup = {
     inline_keyboard: [
       [
-        { text: '🎁 Видати 🫓', callback_data: `admin:prompt:giveto_target:${uId}` },
-        { text: '💎 Видати 💎', callback_data: `admin:prompt:diamondto_target:${uId}` },
-        { text: '🔄 Видати 🔄', callback_data: `admin:prompt:rebirthto_target:${uId}` },
+        { text: '+🫓 Фокачі', callback_data: `admin:prompt:giveto_target:${uId}` },
+        { text: '+💎 Алмази', callback_data: `admin:prompt:diamondto_target:${uId}` },
       ],
       [
-        { text: '⚖️ Списати 🫓', callback_data: `admin:prompt:take_target:${uId}` },
+        { text: '+🔄 Ребіртхи', callback_data: `admin:prompt:rebirthto_target:${uId}` },
+        { text: '-🫓 Списати', callback_data: `admin:prompt:take_target:${uId}` },
+      ],
+      [
         { text: isFlagged ? '✅ Зняти варн' : '⚠️ Видати варн', callback_data: `admin:user_toggle_warn:${uId}` },
+        { text: '📄 Дебаг-лог TXT', callback_data: `admin:user_aclog:${uId}` },
       ],
       [
-        { text: '📄 Дебаг-лог (TXT)', callback_data: `admin:user_aclog:${uId}` },
         { text: '🧹 Очистити нагороди', callback_data: `admin:user_clearreward:${uId}` },
-      ],
-      [
         { text: '🗑 Скинути акаунт', callback_data: `admin:user_reset_confirm:${uId}` },
       ],
       [
