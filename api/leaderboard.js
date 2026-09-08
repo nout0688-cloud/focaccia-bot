@@ -54,6 +54,9 @@ function parsePlayers(data, balanceMap = null, sortBy = 'total') {
         total: Number(p.t) || 0,
         prestige: parseInt(p.p, 10) || 0,
         diamonds,
+        frame: p.fr || 'frame_default',
+        color: p.cl || 'name_default',
+        avatar: p.av || '',
         online: !!p.ts && Date.now() - p.ts < ONLINE_MS,
       });
     } catch { /* skip corrupted */ }
@@ -173,7 +176,21 @@ module.exports = async function handler(req, res) {
       // Карма < 25 — «Тінь бабусі»: прогрес у лідерборді заморожено
       const frozen = karma < 25 && prev && typeof prev.t === 'number';
       const storedTotal = frozen ? prev.t : total;
-      await redis('HSET', 'leaderboard', userId, JSON.stringify({ n: name, u: username, t: storedTotal, p: prestige, d: diamonds, k: clicks, ts: now }));
+      const frame = String(body.frame || prev?.fr || 'frame_default').slice(0, 32);
+      const color = String(body.color || prev?.cl || 'name_default').slice(0, 32);
+      const avatar = String(body.avatar || prev?.av || '').slice(0, 256);
+      await redis('HSET', 'leaderboard', userId, JSON.stringify({
+        n: name,
+        u: username,
+        t: storedTotal,
+        p: prestige,
+        d: diamonds,
+        k: clicks,
+        fr: frame,
+        cl: color,
+        av: avatar,
+        ts: now
+      }));
 
       // Автоматичне оновлення users та usernames при звіті клієнта
       try {
