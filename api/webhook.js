@@ -245,6 +245,542 @@ async function resolveTargetUser(input) {
   return null;
 }
 
+async function deleteTg(token, chatId, messageId) {
+  if (!chatId || !messageId) return null;
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${token}/deleteMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: Number(chatId), message_id: Number(messageId) }),
+    });
+    return res.json();
+  } catch {
+    return null;
+  }
+}
+
+function formatContestCur(cur, amount) {
+  const formatted = (amount || 0).toLocaleString('uk-UA');
+  if (cur === 'gem') return `${formatted} 💎 Алмазів`;
+  if (cur === 'rebirth') return `${formatted} 🔄 Ребіртхів`;
+  return `${formatted} 🫓 Фокач`;
+}
+
+function formatDurationHours(h) {
+  if (h < 1) return `${Math.round(h * 60)} хв`;
+  if (h === 1) return '1 год';
+  if (h < 24) return `${h} год`;
+  const days = Math.round(h / 24);
+  if (days === 1) return '24 год (1 день)';
+  if (days <= 4) return `${days * 24} год (${days} дні)`;
+  return `${days * 24} год (${days} днів)`;
+}
+
+function formatKyivDate(ts) {
+  const d = new Date(ts);
+  return d.toLocaleString('uk-UA', {
+    timeZone: 'Europe/Kyiv',
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+async function getContestDraft(adminId) {
+  const dRaw = await redis('GET', `contest_draft:${adminId}`);
+  if (dRaw?.result) {
+    try {
+      const d = JSON.parse(dRaw.result);
+      return {
+        cur: d.cur || 'foc',
+        amount: d.amount || 10000000,
+        winners: d.winners || 3,
+        durationHours: d.durationHours || 24,
+        builderMsgId: d.builderMsgId || null,
+      };
+    } catch { /* */ }
+  }
+  return {
+    cur: 'foc',
+    amount: 10000000,
+    winners: 3,
+    durationHours: 24,
+    builderMsgId: null,
+  };
+}
+
+async function setContestDraft(adminId, draft) {
+  await redis('SET', `contest_draft:${adminId}`, JSON.stringify(draft), 'EX', 86400);
+}
+
+function renderBuilderMessage(draft) {
+  const endTs = Date.now() + Math.round((draft.durationHours || 24) * 3600 * 1000);
+  const totalPrize = (draft.amount || 10000000) * (draft.winners || 3);
+  const totalFormatted = formatContestCur(draft.cur, totalPrize);
+  const singleFormatted = formatContestCur(draft.cur, draft.amount || 10000000);
+
+  const text =
+    `🛠 *БІЛДЕР КОНКУРСУ* 🎁\n\n` +
+    `Налаштуйте параметри перед запуском розіграшу:\n\n` +
+    `🎁 *Приз кожному:* ${singleFormatted}\n` +
+    `👥 *Кількість переможців:* ${draft.winners || 3} гравців\n` +
+    `⏱ *Тривалість:* ${formatDurationHours(draft.durationHours || 24)}\n` +
+    `📅 *Результати орієнтовно:* ${formatKyivDate(endTs)} (за Києвом)\n` +
+    `💰 *Загальний призовий фонд:* ${totalFormatted}\n\n` +
+    `👇 *Оберіть параметр, який бажаєте змінити:*`;
+
+  const reply_markup = {
+    inline_keyboard: [
+      [{ text: `🎁 Змінити приз (${singleFormatted})`, callback_data: 'concurs:menu:prize' }],
+      [{ text: `👥 Змінити переможців (${draft.winners || 3})`, callback_data: 'concurs:menu:winners' }],
+      [{ text: `⏱ Змінити час (${formatDurationHours(draft.durationHours || 24)})`, callback_data: 'concurs:menu:duration' }],
+      [{ text: '🚀 Опублікувати конкурс усім гравцям', callback_data: 'concurs:publish' }],
+      [{ text: '❌ Закрити білдер', callback_data: 'concurs:close' }],
+    ],
+  };
+
+  return { text, parse_mode: 'Markdown', reply_markup };
+}
+
+function renderPrizeMenu(draft) {
+  const cur = draft.cur || 'foc';
+  const currentFormatted = formatContestCur(cur, draft.amount || 10000000);
+
+  const text =
+    `🎁 *ВИБІР ПРИЗУ ТА СУМИ*\n\n` +
+    `Поточний приз: *${currentFormatted}*\n\n` +
+    `1️⃣ *Оберіть валюту розіграшу:*\n` +
+    `2️⃣ *Оберіть бажану суму зі списку або введіть власну:*`;
+
+  const curRow = [
+    { text: `${cur === 'foc' ? '🔘' : '⚪️'} 🫓 Фокачі`, callback_data: 'concurs:set_cur:foc' },
+    { text: `${cur === 'gem' ? '🔘' : '⚪️'} 💎 Алмази`, callback_data: 'concurs:set_cur:gem' },
+    { text: `${cur === 'rebirth' ? '🔘' : '⚪️'} 🔄 Ребіртхи`, callback_data: 'concurs:set_cur:rebirth' },
+  ];
+
+  let amountRows = [];
+  if (cur === 'foc') {
+    amountRows = [
+      [
+        { text: '500 тис 🫓', callback_data: 'concurs:set_amount:500000' },
+        { text: '1 млн 🫓', callback_data: 'concurs:set_amount:1000000' },
+        { text: '5 млн 🫓', callback_data: 'concurs:set_amount:5000000' },
+      ],
+      [
+        { text: '10 млн 🫓', callback_data: 'concurs:set_amount:10000000' },
+        { text: '25 млн 🫓', callback_data: 'concurs:set_amount:25000000' },
+        { text: '50 млн 🫓', callback_data: 'concurs:set_amount:50000000' },
+      ],
+      [
+        { text: '100 млн 🫓', callback_data: 'concurs:set_amount:100000000' },
+        { text: '500 млн 🫓', callback_data: 'concurs:set_amount:500000000' },
+        { text: '1 млрд 🫓', callback_data: 'concurs:set_amount:1000000000' },
+      ],
+    ];
+  } else if (cur === 'gem') {
+    amountRows = [
+      [
+        { text: '10 💎', callback_data: 'concurs:set_amount:10' },
+        { text: '25 💎', callback_data: 'concurs:set_amount:25' },
+        { text: '50 💎', callback_data: 'concurs:set_amount:50' },
+      ],
+      [
+        { text: '100 💎', callback_data: 'concurs:set_amount:100' },
+        { text: '250 💎', callback_data: 'concurs:set_amount:250' },
+        { text: '500 💎', callback_data: 'concurs:set_amount:500' },
+      ],
+      [
+        { text: '1,000 💎', callback_data: 'concurs:set_amount:1000' },
+        { text: '2,500 💎', callback_data: 'concurs:set_amount:2500' },
+        { text: '5,000 💎', callback_data: 'concurs:set_amount:5000' },
+      ],
+    ];
+  } else {
+    amountRows = [
+      [
+        { text: '1 🔄', callback_data: 'concurs:set_amount:1' },
+        { text: '2 🔄', callback_data: 'concurs:set_amount:2' },
+        { text: '3 🔄', callback_data: 'concurs:set_amount:3' },
+      ],
+      [
+        { text: '5 🔄', callback_data: 'concurs:set_amount:5' },
+        { text: '10 🔄', callback_data: 'concurs:set_amount:10' },
+        { text: '20 🔄', callback_data: 'concurs:set_amount:20' },
+      ],
+    ];
+  }
+
+  const customRow = [
+    [{ text: '✍️ Ввести свою суму вручну', callback_data: 'concurs:custom_amount' }],
+    [{ text: '⬅️ Назад до білдера', callback_data: 'concurs:back' }],
+  ];
+
+  return {
+    text,
+    parse_mode: 'Markdown',
+    reply_markup: {
+      inline_keyboard: [curRow, ...amountRows, ...customRow],
+    },
+  };
+}
+
+function renderWinnersMenu(draft) {
+  const current = draft.winners || 3;
+  const text =
+    `👥 *КІЛЬКІСТЬ ПЕРЕМОЖЦІВ*\n\n` +
+    `Поточна кількість: *${current}* гравців\n\n` +
+    `Скільки випадкових учасників отримають зазначений приз?`;
+
+  const deltaRow = [
+    { text: '➖ 1', callback_data: 'concurs:delta_winners:-1' },
+    { text: `[ ${current} ]`, callback_data: 'concurs:none' },
+    { text: '➕ 1', callback_data: 'concurs:delta_winners:1' },
+  ];
+
+  const presetsRow1 = [
+    { text: current === 1 ? '🔘 1' : '1', callback_data: 'concurs:set_winners:1' },
+    { text: current === 2 ? '🔘 2' : '2', callback_data: 'concurs:set_winners:2' },
+    { text: current === 3 ? '🔘 3' : '3', callback_data: 'concurs:set_winners:3' },
+  ];
+
+  const presetsRow2 = [
+    { text: current === 5 ? '🔘 5' : '5', callback_data: 'concurs:set_winners:5' },
+    { text: current === 10 ? '🔘 10' : '10', callback_data: 'concurs:set_winners:10' },
+    { text: current === 20 ? '🔘 20' : '20', callback_data: 'concurs:set_winners:20' },
+  ];
+
+  const backRow = [
+    { text: '⬅️ Назад до білдера', callback_data: 'concurs:back' },
+  ];
+
+  return {
+    text,
+    parse_mode: 'Markdown',
+    reply_markup: {
+      inline_keyboard: [deltaRow, presetsRow1, presetsRow2, backRow],
+    },
+  };
+}
+
+function renderDurationMenu(draft) {
+  const current = draft.durationHours || 24;
+  const text =
+    `⏱ *ТРИВАЛІСТЬ КОНКУРСУ*\n\n` +
+    `Поточний час: *${formatDurationHours(current)}*\n\n` +
+    `Оберіть, скільки часу триватиме розіграш до автоматичного визначення переможців:`;
+
+  const rows = [
+    [
+      { text: current === 0.25 ? '🔘 15 хв' : '15 хв', callback_data: 'concurs:set_duration:0.25' },
+      { text: current === 0.5 ? '🔘 30 хв' : '30 хв', callback_data: 'concurs:set_duration:0.5' },
+      { text: current === 1 ? '🔘 1 год' : '1 год', callback_data: 'concurs:set_duration:1' },
+    ],
+    [
+      { text: current === 3 ? '🔘 3 год' : '3 год', callback_data: 'concurs:set_duration:3' },
+      { text: current === 6 ? '🔘 6 год' : '6 год', callback_data: 'concurs:set_duration:6' },
+      { text: current === 12 ? '🔘 12 год' : '12 год', callback_data: 'concurs:set_duration:12' },
+    ],
+    [
+      { text: current === 24 ? '🔘 24 год (1д)' : '24 год (1д)', callback_data: 'concurs:set_duration:24' },
+      { text: current === 48 ? '🔘 48 год (2д)' : '48 год (2д)', callback_data: 'concurs:set_duration:48' },
+      { text: current === 72 ? '🔘 3 дні' : '3 дні', callback_data: 'concurs:set_duration:72' },
+    ],
+    [
+      { text: current === 168 ? '🔘 1 тиждень' : '1 тиждень', callback_data: 'concurs:set_duration:168' },
+    ],
+    [
+      { text: '⬅️ Назад до білдера', callback_data: 'concurs:back' },
+    ],
+  ];
+
+  return {
+    text,
+    parse_mode: 'Markdown',
+    reply_markup: {
+      inline_keyboard: rows,
+    },
+  };
+}
+
+async function handleContestJoin(TOKEN, contestId, fromUser) {
+  if (!contestId || !fromUser?.id) return { msg: '❌ Помилка запиту' };
+  const userId = String(fromUser.id);
+  const name = fromUser.first_name || 'Гравець';
+  const username = fromUser.username || '';
+
+  const cRaw = await redis('HGET', 'contest:' + contestId, 'data');
+  if (!cRaw?.result) {
+    return { msg: '❌ Конкурс не знайдено або він застарів', alert: true };
+  }
+
+  let contestObj;
+  try { contestObj = JSON.parse(cRaw.result); } catch { return { msg: '❌ Помилка даних', alert: true }; }
+
+  if (contestObj.status !== 'active') {
+    return { msg: '🏁 Цей конкурс уже завершено!', alert: true };
+  }
+
+  if (Date.now() >= contestObj.endTime) {
+    finishContest(TOKEN, contestId).catch(() => {});
+    return { msg: '⏳ Час вийшов! Зараз підбиваються підсумки...', alert: true };
+  }
+
+  const addRes = await redis('SADD', 'contest:' + contestId + ':participants', userId);
+  const wasAdded = addRes?.result === 1;
+
+  await redis('HSET', 'contest:' + contestId + ':users', userId, JSON.stringify({ name, username }));
+
+  const cardRes = await redis('SCARD', 'contest:' + contestId + ':participants');
+  const count = cardRes?.result || 1;
+
+  if (wasAdded) {
+    return {
+      msg: '🎉 Вітаємо! Ти береш участь у розіграші! Удачі 🍀',
+      alert: false,
+      updatedCount: count,
+    };
+  } else {
+    return {
+      msg: '✅ Ти вже береш участь у цьому конкурсі! Очікуй результатів.',
+      alert: false,
+      updatedCount: count,
+    };
+  }
+}
+
+async function publishContest(TOKEN, adminChatId, draft) {
+  const contestId = 'c_' + Date.now();
+  const durationHours = draft.durationHours || 24;
+  const durationMs = Math.round(durationHours * 3600 * 1000);
+  const startTime = Date.now();
+  const endTime = startTime + durationMs;
+
+  const contestObj = {
+    id: contestId,
+    cur: draft.cur || 'foc',
+    amount: draft.amount || 10000000,
+    winners: draft.winners || 3,
+    durationHours,
+    startTime,
+    endTime,
+    status: 'active',
+    creatorId: String(adminChatId),
+  };
+
+  await redis('HSET', 'contest:' + contestId, 'data', JSON.stringify(contestObj));
+  await redis('SADD', 'active_contests', contestId);
+
+  const singlePrize = formatContestCur(draft.cur, draft.amount);
+  const totalPrize = formatContestCur(draft.cur, draft.amount * draft.winners);
+  const endFormatted = formatKyivDate(endTime);
+
+  const announceText =
+    `🎉 *РОЗІГРАШ У ФОКАЧА КЛІКЕР!* 🎉\n\n` +
+    `Пекарня запускає новий конкурс для всіх пекарів!\n\n` +
+    `🎁 *Приз переможцю:* ${singlePrize}\n` +
+    `👥 *Кількість переможців:* ${draft.winners} гравців\n` +
+    `💰 *Загальний призовий фонд:* ${totalPrize}\n` +
+    `⏱ *Підбиття підсумків:* ${endFormatted} (за Києвом)\n\n` +
+    `👇 *Тисни кнопку нижче, щоб взяти участь у розіграші:*`;
+
+  const contestMarkup = {
+    inline_keyboard: [
+      [{ text: '🎉 Взяти участь (0)', callback_data: `concurs:join:${contestId}` }],
+      [{ text: '🫓 Відкрити Фокача Клікер', web_app: { url: WEBAPP_URL } }],
+    ],
+  };
+
+  const usersData = await redis('HGETALL', 'users');
+  let sentCount = 0;
+  if (usersData?.result && usersData.result.length > 0) {
+    const entries = usersData.result;
+    for (let i = 0; i < entries.length; i += 2) {
+      const uid = entries[i];
+      try {
+        await sendTg(TOKEN, 'sendMessage', {
+          chat_id: Number(uid),
+          text: announceText,
+          parse_mode: 'Markdown',
+          reply_markup: contestMarkup,
+        });
+        sentCount++;
+      } catch { /* skip */ }
+    }
+  } else {
+    await sendTg(TOKEN, 'sendMessage', {
+      chat_id: adminChatId,
+      text: announceText,
+      parse_mode: 'Markdown',
+      reply_markup: contestMarkup,
+    });
+    sentCount = 1;
+  }
+
+  await sendTg(TOKEN, 'sendMessage', {
+    chat_id: adminChatId,
+    text:
+      `✅ *Конкурс успішно створено та опубліковано!*\n\n` +
+      `🆔 ID: \`${contestId}\`\n` +
+      `🎁 Приз: *${singlePrize}* кожному\n` +
+      `👥 Переможців: *${draft.winners}*\n` +
+      `📨 Оповіщено гравців: *${sentCount}*\n` +
+      `⏱ Дата завершення: *${endFormatted}*\n\n` +
+      `📋 *Керування:*\n` +
+      `• Достроково підбити підсумки: \`/concurs_finish ${contestId}\`\n` +
+      `• Скасувати розіграш: \`/concurs_cancel ${contestId}\`\n` +
+      `• Список активних: \`/concurs_list\``,
+    parse_mode: 'Markdown',
+  });
+}
+
+async function finishContest(TOKEN, contestId, force = false) {
+  if (!contestId) return null;
+  const cRaw = await redis('HGET', 'contest:' + contestId, 'data');
+  if (!cRaw?.result) return null;
+
+  let contestObj;
+  try { contestObj = JSON.parse(cRaw.result); } catch { return null; }
+
+  if (contestObj.status !== 'active' && !force) return null;
+
+  contestObj.status = 'finished';
+  contestObj.finishedAt = Date.now();
+  await redis('HSET', 'contest:' + contestId, 'data', JSON.stringify(contestObj));
+  await redis('SREM', 'active_contests', contestId);
+
+  const pRes = await redis('SMEMBERS', 'contest:' + contestId + ':participants');
+  const participants = pRes?.result || [];
+
+  const curFormatted = formatContestCur(contestObj.cur, contestObj.amount);
+
+  if (participants.length === 0) {
+    const noUsersMsg =
+      `🏁 *КОНКУРС ЗАВЕРШЕНО*\n\n` +
+      `🆔 ID: \`${contestId}\`\n` +
+      `🎁 Приз: *${curFormatted}*\n\n` +
+      `На жаль, у конкурсі не було жодного учасника 😢`;
+    if (contestObj.creatorId) {
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: Number(contestObj.creatorId),
+        text: noUsersMsg,
+        parse_mode: 'Markdown',
+      });
+    }
+    return;
+  }
+
+  const shuffled = [...participants].sort(() => Math.random() - 0.5);
+  const targetWinners = Math.max(1, Math.min(contestObj.winners, shuffled.length));
+  const winnersList = shuffled.slice(0, targetWinners);
+
+  const winnersDetails = [];
+  for (let i = 0; i < winnersList.length; i++) {
+    const wid = String(winnersList[i]);
+
+    if (contestObj.cur === 'gem') {
+      const gRaw = await redis('GET', `reward_gem:${wid}`);
+      const gCur = gRaw?.result ? parseInt(gRaw.result, 10) : 0;
+      await redis('SET', `reward_gem:${wid}`, String(gCur + contestObj.amount));
+    } else if (contestObj.cur === 'rebirth') {
+      const rRaw = await redis('GET', `rebirth:${wid}`);
+      const rCur = rRaw?.result ? parseInt(rRaw.result, 10) : 0;
+      await redis('SET', `rebirth:${wid}`, String(rCur + contestObj.amount));
+    } else {
+      const fRaw = await redis('GET', `reward:${wid}`);
+      const fCur = fRaw?.result ? parseInt(fRaw.result, 10) : 0;
+      await redis('SET', `reward:${wid}`, String(fCur + contestObj.amount));
+    }
+
+    let disp = `Гравець \`${wid}\``;
+    const uRaw = await redis('HGET', 'contest:' + contestId + ':users', wid);
+    if (uRaw?.result) {
+      try {
+        const u = JSON.parse(uRaw.result);
+        disp = u.username ? `@${u.username}` : (u.name || `ID ${wid}`);
+      } catch { /* */ }
+    } else {
+      const uData = await redis('HGET', 'users', wid);
+      if (uData?.result) {
+        try {
+          const u = JSON.parse(uData.result);
+          disp = u.username ? `@${u.username}` : (u.name || `ID ${wid}`);
+        } catch { /* */ }
+      }
+    }
+    winnersDetails.push({ id: wid, display: disp });
+
+    try {
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: Number(wid),
+        text:
+          `🎉 *ВІТАЄМО! ТИ ПЕРЕМІГ У РОЗІГРАШІ!* 🏆\n\n` +
+          `🎁 Твій приз: *${curFormatted}*!\n` +
+          `🫓 Нагороду вже нараховано! Відкрий гру щоб забрати її!`,
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [[{ text: '🫓 Забрати приз!', web_app: { url: WEBAPP_URL } }]],
+        },
+      });
+    } catch { /* ignore */ }
+  }
+
+  let resText =
+    `🏆 *РЕЗУЛЬТАТИ РОЗІГРАШУ!* 🏆\n\n` +
+    `🎁 Приз: *${curFormatted}* кожному переможцю\n` +
+    `👥 Всього учасників: *${participants.length}*\n` +
+    `👑 Переможців: *${winnersDetails.length}*\n\n` +
+    `🎉 *ПЕРЕМОЖЦІ:*\n`;
+
+  winnersDetails.forEach((w, idx) => {
+    resText += `${idx + 1}. ${w.display} — *${curFormatted}*\n`;
+  });
+
+  resText += `\n✨ Призи автоматично нараховано на акаунти переможців!\nДякуємо всім за участь! 🫓🍀`;
+
+  if (contestObj.creatorId) {
+    await sendTg(TOKEN, 'sendMessage', {
+      chat_id: Number(contestObj.creatorId),
+      text: resText,
+      parse_mode: 'Markdown',
+    });
+  }
+
+  const notifyList = participants.filter((p) => String(p) !== String(contestObj.creatorId)).slice(0, 25);
+  for (const pid of notifyList) {
+    try {
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: Number(pid),
+        text: resText,
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [[{ text: '🫓 Відкрити Фокача Клікер', web_app: { url: WEBAPP_URL } }]],
+        },
+      });
+    } catch { /* skip */ }
+  }
+}
+
+async function checkExpiredContests(TOKEN) {
+  try {
+    const activeRes = await redis('SMEMBERS', 'active_contests');
+    if (!activeRes?.result || activeRes.result.length === 0) return;
+    const now = Date.now();
+    for (const cId of activeRes.result) {
+      const cRaw = await redis('HGET', 'contest:' + cId, 'data');
+      if (cRaw?.result) {
+        try {
+          const cObj = JSON.parse(cRaw.result);
+          if (cObj.status === 'active' && now >= cObj.endTime) {
+            await finishContest(TOKEN, cId);
+          }
+        } catch { /* skip */ }
+      }
+    }
+  } catch { /* ignore */ }
+}
+
 module.exports = async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(200).json({ ok: true, msg: '🫓 Focaccia bot is alive!' });
@@ -255,6 +791,8 @@ module.exports = async function handler(req, res) {
 
   // 🧹 Автоматичне видалення застарілих повідомлень налаштування дуелей (>15 хв)
   await cleanupExpiredMessages(TOKEN);
+  // ⏱ Автоматична перевірка та підбиття підсумків активних конкурсів
+  await checkExpiredContests(TOKEN);
 
   try {
     const update = req.body;
@@ -495,6 +1033,176 @@ module.exports = async function handler(req, res) {
       }
     }
 
+    // ===== 🎁 КОНКУРСИ: callback-кнопки =====
+    if (cq && typeof cq.data === 'string' && (cq.data.startsWith('concurs:') || cq.data.startsWith('contest:'))) {
+      const cqChat = cq.message?.chat?.id ?? cq.from.id;
+      const cqMsgId = cq.message?.message_id;
+      const parts = cq.data.split(':');
+      const action = parts[1];
+
+      try {
+        await fetch(`https://api.telegram.org/bot${TOKEN}/answerCallbackQuery`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ callback_query_id: cq.id }),
+        });
+      } catch { /* ignore */ }
+
+      // 1. Участь у конкурсі (доступно будь-якому гравцю)
+      if (action === 'join') {
+        const contestId = parts[2];
+        const joinRes = await handleContestJoin(TOKEN, contestId, cq.from);
+        try {
+          await fetch(`https://api.telegram.org/bot${TOKEN}/answerCallbackQuery`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              callback_query_id: cq.id,
+              text: joinRes.msg,
+              show_alert: joinRes.alert || false,
+            }),
+          });
+        } catch { /* ignore */ }
+
+        if (joinRes.updatedCount !== undefined && cqMsgId) {
+          try {
+            await sendTg(TOKEN, 'editMessageReplyMarkup', {
+              chat_id: cqChat,
+              message_id: cqMsgId,
+              reply_markup: {
+                inline_keyboard: [
+                  [{ text: `🎉 Взяти участь (${joinRes.updatedCount})`, callback_data: `concurs:join:${contestId}` }],
+                  [{ text: '🫓 Відкрити Фокача Клікер', web_app: { url: WEBAPP_URL } }],
+                ],
+              },
+            });
+          } catch { /* ignore */ }
+        }
+        return res.status(200).json({ ok: true });
+      }
+
+      // Решта дій — ТІЛЬКИ ДЛЯ АДМІНА
+      if (!isAdmin(cq.from.id)) {
+        return res.status(200).json({ ok: true });
+      }
+
+      const draft = await getContestDraft(cqChat);
+
+      if (action === 'none') {
+        return res.status(200).json({ ok: true });
+      }
+
+      if (action === 'close') {
+        if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+        return res.status(200).json({ ok: true });
+      }
+
+      // Перехід у підменю (видаляємо старе повідомлення, відправляємо нове)
+      if (action === 'menu') {
+        const sub = parts[2];
+        if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+
+        let menuData;
+        if (sub === 'prize') menuData = renderPrizeMenu(draft);
+        else if (sub === 'winners') menuData = renderWinnersMenu(draft);
+        else if (sub === 'duration') menuData = renderDurationMenu(draft);
+        else menuData = renderBuilderMessage(draft);
+
+        await sendTg(TOKEN, 'sendMessage', { chat_id: cqChat, ...menuData });
+        return res.status(200).json({ ok: true });
+      }
+
+      if (action === 'set_cur') {
+        const cur = parts[2];
+        draft.cur = cur;
+        if (cur === 'foc' && draft.amount < 100000) draft.amount = 10000000;
+        if (cur === 'gem' && draft.amount > 10000) draft.amount = 100;
+        if (cur === 'rebirth' && draft.amount > 50) draft.amount = 5;
+        await setContestDraft(cqChat, draft);
+
+        if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+        await sendTg(TOKEN, 'sendMessage', { chat_id: cqChat, ...renderPrizeMenu(draft) });
+        return res.status(200).json({ ok: true });
+      }
+
+      // Вибір готової суми: видаляємо меню з сумами, відправляємо головний білдер
+      if (action === 'set_amount') {
+        const amt = parseInt(parts[2], 10);
+        if (amt && amt > 0) draft.amount = amt;
+        await setContestDraft(cqChat, draft);
+
+        if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+        await sendTg(TOKEN, 'sendMessage', { chat_id: cqChat, ...renderBuilderMessage(draft) });
+        return res.status(200).json({ ok: true });
+      }
+
+      // Кастомна сума: видаляємо меню, запитуємо число
+      if (action === 'custom_amount') {
+        if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+        const promptSent = await sendTg(TOKEN, 'sendMessage', {
+          chat_id: cqChat,
+          text: `✍️ *Введіть суму виграшу числами* (наприклад: 50000000):\n\nПоточна валюта: *${draft.cur === 'gem' ? 'Алмази 💎' : draft.cur === 'rebirth' ? 'Ребіртхи 🔄' : 'Фокачі 🫓'}*`,
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [[{ text: '⬅️ Назад до білдера', callback_data: 'concurs:back' }]],
+          },
+        });
+        const promptMsgId = promptSent?.result?.message_id || '1';
+        await redis('SET', `concurs_await_amount:${cqChat}`, String(promptMsgId), 'EX', 300);
+        return res.status(200).json({ ok: true });
+      }
+
+      // Кількість переможців: вибір числа або дельта
+      if (action === 'set_winners') {
+        const w = parseInt(parts[2], 10);
+        if (w && w > 0) draft.winners = w;
+        await setContestDraft(cqChat, draft);
+
+        if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+        await sendTg(TOKEN, 'sendMessage', { chat_id: cqChat, ...renderBuilderMessage(draft) });
+        return res.status(200).json({ ok: true });
+      }
+
+      if (action === 'delta_winners') {
+        const delta = parseInt(parts[2], 10);
+        const next = Math.max(1, Math.min(100, (draft.winners || 3) + delta));
+        draft.winners = next;
+        await setContestDraft(cqChat, draft);
+
+        if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+        await sendTg(TOKEN, 'sendMessage', { chat_id: cqChat, ...renderWinnersMenu(draft) });
+        return res.status(200).json({ ok: true });
+      }
+
+      // Тривалість конкурсу
+      if (action === 'set_duration') {
+        const dur = parseFloat(parts[2]);
+        if (dur && dur > 0) draft.durationHours = dur;
+        await setContestDraft(cqChat, draft);
+
+        if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+        await sendTg(TOKEN, 'sendMessage', { chat_id: cqChat, ...renderBuilderMessage(draft) });
+        return res.status(200).json({ ok: true });
+      }
+
+      // Кнопка назад: видаляємо поточне підменю, відправляємо білдер
+      if (action === 'back') {
+        await redis('DEL', `concurs_await_amount:${cqChat}`);
+        if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+        await sendTg(TOKEN, 'sendMessage', { chat_id: cqChat, ...renderBuilderMessage(draft) });
+        return res.status(200).json({ ok: true });
+      }
+
+      // Публікація конкурсу
+      if (action === 'publish') {
+        if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+        await publishContest(TOKEN, cqChat, draft);
+        return res.status(200).json({ ok: true });
+      }
+
+      return res.status(200).json({ ok: true });
+    }
+
     const msg = update.message;
     if (!msg?.text) return res.status(200).json({ ok: true });
 
@@ -553,6 +1261,25 @@ module.exports = async function handler(req, res) {
           ],
         },
       });
+      return res.status(200).json({ ok: true });
+    }
+
+    // 🎁 Очікування введення суми для конкурсу
+    const contestAmtAwait = await redis('GET', `concurs_await_amount:${chatId}`);
+    if (contestAmtAwait?.result && isAdmin(userId)) {
+      await redis('DEL', `concurs_await_amount:${chatId}`);
+      const promptId = Number(contestAmtAwait.result);
+      if (promptId) await deleteTg(TOKEN, chatId, promptId);
+      if (msg.message_id) await deleteTg(TOKEN, chatId, msg.message_id);
+
+      const draft = await getContestDraft(chatId);
+      const cleaned = text.replace(/[\s_,]/g, '');
+      const num = parseInt(cleaned, 10);
+      if (!isNaN(num) && num > 0) {
+        draft.amount = num;
+        await setContestDraft(chatId, draft);
+      }
+      await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, ...renderBuilderMessage(draft) });
       return res.status(200).json({ ok: true });
     }
 
@@ -636,7 +1363,12 @@ module.exports = async function handler(req, res) {
           `• \`/warn <юзер|ID>\` — видати знак ⚠️ вручну\n` +
           `• \`/unflag <юзер|ID>\` — зняти знак ⚠️ з гравця\n` +
           `• \`/reset <юзер|ID>\` — скинути акаунт юзера\n` +
-          `• \`/reset_all\` — скинути акаунти ВСІХ гравців`,
+          `• \`/reset_all\` — скинути акаунти ВСІХ гравців\n\n` +
+          `🎁 *Розіграші та конкурси:*\n` +
+          `• \`/concurs\` — інтерактивний білдер конкурсу\n` +
+          `• \`/concurs_list\` — список активних розіграшів\n` +
+          `• \`/concurs_finish <ID>\` — достроково підбити підсумки\n` +
+          `• \`/concurs_cancel <ID>\` — скасувати розіграш`,
         parse_mode: 'Markdown',
       });
       return res.status(200).json({ ok: true });
@@ -1460,6 +2192,149 @@ module.exports = async function handler(req, res) {
       await sendTg(TOKEN, 'sendMessage', {
         chat_id: chatId,
         text: `✅ Успішно активовано скидання для ВСІХ гравців (${count} акаунтів)!`,
+      });
+      return res.status(200).json({ ok: true });
+    }
+
+    // ===== /concurs /contest /giveaway — білдер розіграшу =====
+    if (
+      cmd === '/concurs' || cmd === 'concurs' ||
+      cmd === '/contest' || cmd === 'contest' ||
+      cmd === '/giveaway' || cmd === 'giveaway' ||
+      cmd === 'конкурс' || cmd === 'розіграш'
+    ) {
+      if (msg.message_id) {
+        await deleteTg(TOKEN, chatId, msg.message_id);
+      }
+      const draft = await getContestDraft(chatId);
+      await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, ...renderBuilderMessage(draft) });
+      return res.status(200).json({ ok: true });
+    }
+
+    // ===== /concurs_list — список активних розіграшів =====
+    if (
+      cmd === '/concurs_list' || cmd === 'concurs_list' ||
+      cmd === '/contest_list' || cmd === 'contest_list' ||
+      cmd === 'конкурси'
+    ) {
+      const activeRes = await redis('SMEMBERS', 'active_contests');
+      const activeIds = activeRes?.result || [];
+
+      if (activeIds.length === 0) {
+        await sendTg(TOKEN, 'sendMessage', {
+          chat_id: chatId,
+          text: '🎁 Наразі немає активних розіграшів.\n\nСтворити новий: `/concurs`',
+          parse_mode: 'Markdown',
+        });
+        return res.status(200).json({ ok: true });
+      }
+
+      let textRes = `📋 *АКТИВНІ РОЗІГРАШІ (${activeIds.length}):*\n\n`;
+      for (const cId of activeIds) {
+        const cRaw = await redis('HGET', 'contest:' + cId, 'data');
+        if (!cRaw?.result) continue;
+        try {
+          const cObj = JSON.parse(cRaw.result);
+          const pCard = await redis('SCARD', 'contest:' + cId + ':participants');
+          const pCount = pCard?.result || 0;
+          const curFmt = formatContestCur(cObj.cur, cObj.amount);
+          const endFmt = formatKyivDate(cObj.endTime);
+          const msLeft = cObj.endTime - Date.now();
+          const timeLeft = msLeft > 0 ? formatDurationHours(Math.max(0.1, msLeft / 3600000)) : 'Завершується...';
+
+          textRes +=
+            `🔹 ID: \`${cId}\`\n` +
+            `🎁 Приз: *${curFmt}* кожному\n` +
+            `👥 Переможців: *${cObj.winners}* | Учасників: *${pCount}*\n` +
+            `⏱ Залишилось: *${timeLeft}* (до ${endFmt})\n` +
+            `⚙️ Завершити: \`/concurs_finish ${cId}\`\n` +
+            `❌ Скасувати: \`/concurs_cancel ${cId}\`\n\n`;
+        } catch { /* skip */ }
+      }
+
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: textRes,
+        parse_mode: 'Markdown',
+      });
+      return res.status(200).json({ ok: true });
+    }
+
+    // ===== /concurs_finish <id> — достроково підбити підсумки =====
+    if (
+      cmd.startsWith('/concurs_finish') || cmd.startsWith('concurs_finish') ||
+      cmd.startsWith('/contest_finish') || cmd.startsWith('contest_finish')
+    ) {
+      const parts = text.split(/\s+/);
+      const targetId = parts[1]?.trim();
+
+      if (!targetId) {
+        await sendTg(TOKEN, 'sendMessage', {
+          chat_id: chatId,
+          text: '❌ Вкажіть ID конкурсу:\nПриклад: `/concurs_finish c_1712345678901`\n\nСписок активних: `/concurs_list`',
+          parse_mode: 'Markdown',
+        });
+        return res.status(200).json({ ok: true });
+      }
+
+      const cRaw = await redis('HGET', 'contest:' + targetId, 'data');
+      if (!cRaw?.result) {
+        await sendTg(TOKEN, 'sendMessage', {
+          chat_id: chatId,
+          text: `❌ Конкурс з ID \`${targetId}\` не знайдено.`,
+          parse_mode: 'Markdown',
+        });
+        return res.status(200).json({ ok: true });
+      }
+
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: `⏳ Підбиваю підсумки розіграшу \`${targetId}\`...`,
+        parse_mode: 'Markdown',
+      });
+
+      await finishContest(TOKEN, targetId, true);
+      return res.status(200).json({ ok: true });
+    }
+
+    // ===== /concurs_cancel <id> — скасувати конкурс без видачі призів =====
+    if (
+      cmd.startsWith('/concurs_cancel') || cmd.startsWith('concurs_cancel') ||
+      cmd.startsWith('/contest_cancel') || cmd.startsWith('contest_cancel')
+    ) {
+      const parts = text.split(/\s+/);
+      const targetId = parts[1]?.trim();
+
+      if (!targetId) {
+        await sendTg(TOKEN, 'sendMessage', {
+          chat_id: chatId,
+          text: '❌ Вкажіть ID конкурсу для скасування:\nПриклад: `/concurs_cancel c_1712345678901`',
+          parse_mode: 'Markdown',
+        });
+        return res.status(200).json({ ok: true });
+      }
+
+      const cRaw = await redis('HGET', 'contest:' + targetId, 'data');
+      if (!cRaw?.result) {
+        await sendTg(TOKEN, 'sendMessage', {
+          chat_id: chatId,
+          text: `❌ Конкурс з ID \`${targetId}\` не знайдено.`,
+          parse_mode: 'Markdown',
+        });
+        return res.status(200).json({ ok: true });
+      }
+
+      let cObj = {};
+      try { cObj = JSON.parse(cRaw.result); } catch { /* */ }
+      cObj.status = 'cancelled';
+      cObj.cancelledAt = Date.now();
+      await redis('HSET', 'contest:' + targetId, 'data', JSON.stringify(cObj));
+      await redis('SREM', 'active_contests', targetId);
+
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: `🛑 Конкурс \`${targetId}\` скасовано! Нагороди не нараховувались.`,
+        parse_mode: 'Markdown',
       });
       return res.status(200).json({ ok: true });
     }
