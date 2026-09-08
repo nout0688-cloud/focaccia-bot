@@ -7,6 +7,7 @@
 const FRESH_MS = 30 * 24 * 60 * 60 * 1000; // гравців, які не заходили 30 днів, не показуємо
 const ONLINE_MS = 3 * 60 * 1000; // репорт кожні 60с — онлайн якщо свіжий ≤ 3 хв
 const HOUR_MS = 60 * 60 * 1000;
+const ADMIN_ID = process.env.ADMIN_ID ? parseInt(process.env.ADMIN_ID, 10) : 1975429762;
 
 // Карма 0–100: детект −15, випробування +10 (макс 75), +1 за годину онлайн-гри.
 // Карма < 25 → «Тінь бабусі»: лідерборд заморожено.
@@ -62,6 +63,7 @@ function parsePlayers(data, balanceMap = null, sortBy = 'total') {
         color: p.cl || 'name_default',
         avatar: p.av || '',
         online: !!p.ts && Date.now() - p.ts < ONLINE_MS,
+        isDev: String(id) === String(ADMIN_ID),
       });
     } catch { /* skip corrupted */ }
   }
