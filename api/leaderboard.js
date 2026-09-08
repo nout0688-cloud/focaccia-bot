@@ -54,6 +54,10 @@ function parsePlayers(data, balanceMap = null, sortBy = 'total') {
         total: Number(p.t) || 0,
         prestige: parseInt(p.p, 10) || 0,
         diamonds,
+        clicks: Number(p.k) || 0,
+        bosses: Number(p.b) || 0,
+        achievements: Number(p.ac) || 0,
+        showcase: Array.isArray(p.sc) && p.sc.length ? p.sc : ['clicks', 'total', 'diamonds'],
         frame: p.fr || 'frame_default',
         color: p.cl || 'name_default',
         avatar: p.av || '',
@@ -176,6 +180,9 @@ module.exports = async function handler(req, res) {
       // Карма < 25 — «Тінь бабусі»: прогрес у лідерборді заморожено
       const frozen = karma < 25 && prev && typeof prev.t === 'number';
       const storedTotal = frozen ? prev.t : total;
+      const bosses = Math.max(0, Math.min(parseInt(body.bosses, 10) || 0, 1e6));
+      const achievements = Math.max(0, Math.min(parseInt(body.achievements, 10) || 0, 100));
+      const showcase = Array.isArray(body.showcase) ? body.showcase.slice(0, 3) : (prev?.sc || ['clicks', 'total', 'diamonds']);
       const frame = String(body.frame || prev?.fr || 'frame_default').slice(0, 32);
       const color = String(body.color || prev?.cl || 'name_default').slice(0, 32);
       const avatar = String(body.avatar || prev?.av || '').slice(0, 256);
@@ -186,6 +193,9 @@ module.exports = async function handler(req, res) {
         p: prestige,
         d: diamonds,
         k: clicks,
+        b: bosses,
+        ac: achievements,
+        sc: showcase,
         fr: frame,
         cl: color,
         av: avatar,
