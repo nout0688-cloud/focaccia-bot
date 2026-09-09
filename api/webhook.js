@@ -3,7 +3,7 @@
  * Webhook + Admin panel для user ID 1975429762
  */
 
-const WEBAPP_URL = 'https://nout0688-cloud.github.io/focaccia-clicker/?v=1.3.4';
+const WEBAPP_URL = 'https://nout0688-cloud.github.io/focaccia-clicker/?v=1.3.5';
 const ADMIN_ID = process.env.ADMIN_ID ? parseInt(process.env.ADMIN_ID, 10) : 1975429762;
 
 async function redis(...args) {
@@ -3020,6 +3020,167 @@ module.exports = async function handler(req, res) {
 
       if (!isAdmin(cq.from.id)) {
         return res.status(200).json({ ok: true });
+      }
+
+      // ===== 🏦 ПІДТВЕРДЖЕННЯ / ВІДХИЛЕННЯ ОПЛАТИ НА БАНКУ =====
+      if (action === 'order_ok' || action === 'order_no') {
+        const orderId = targetId;
+        const oRaw = await redis('GET', `order:${orderId}`);
+        if (!oRaw?.result) {
+          await fetch(`https://api.telegram.org/bot${TOKEN}/answerCallbackQuery`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ callback_query_id: cq.id, text: '⚠️ Замовлення не знайдено або застаріло', show_alert: true }),
+          });
+          return res.status(200).json({ ok: true });
+        }
+
+        let order = {};
+        try { order = JSON.parse(oRaw.result); } catch {}
+
+        if (order.status !== 'pending') {
+          await fetch(`https://api.telegram.org/bot${TOKEN}/answerCallbackQuery`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ callback_query_id: cq.id, text: `⚠️ Це замовлення вже ${order.status === 'completed' ? 'підтверджено' : 'відхилено'}!`, show_alert: true }),
+          });
+          return res.status(200).json({ ok: true });
+        }
+
+        if (action === 'order_ok') {
+          order.status = 'completed';
+          order.completedAt = Date.now();
+          await redis('SET', `order:${orderId}`, JSON.stringify(order), 'EX', 172800);
+
+          // Credit diamonds
+          if (order.diamonds > 0) {
+            const existing = await redis('GET', `reward_gem:${order.userId}`);
+            const prevGems = existing?.result ? parseInt(existing.result, 10) : 0;
+            await redis('SET', `reward_gem:${order.userId}`, String(prevGems + order.diamonds));
+            await redis('SET', `reward_gem_source:${order.userId}`, 'donate_jar');
+          }
+
+          // Starter pack weapon
+          if (order.isStarter) {
+            await redis('HSET', `user_extra:${order.userId}`, 'vip_upgrade', 'vip_hammer');
+          }
+
+          // Patron badge
+          if (order.isTip) {
+            await redis('HSET', `user_extra:${order.userId}`, 'badge_patron', '1');
+          }
+
+          // Stats
+          await redis('HINCRBY', 'donations_total_uah', String(order.userId), String(order.amountUah || 0));
+          await redis('HINCRBY', 'donations_count', String(order.userId), '1');
+          await redis('INCRBY', 'global_donations_uah', String(order.amountUah || 0));
+
+          // Edit admin message
+          const nowKyiv = new Date().toLocaleTimeString('uk-UA', { timeZone: 'Europe/Kyiv', hour: '2-digit', minute: '2-digit' });
+          const userDisplay = order.username ? `@${order.username}` : `(без @username)`;
+          const editedAdminText =
+`✅ <b>ЗАМОВЛЕННЯ #${order.id} ПІДТВЕРДЖЕНО!</b>
+
+👤 Гравець: ${userDisplay} (ID: <code>${order.userId}</code>)
+📦 Товар: <b>${order.title}</b>
+💵 Оплачено: <b>${order.amountUah} ₴</b>
+💎 Нараховано: <b>+${order.diamonds} 💎</b>${order.isStarter ? ' + Бойова скалка 🪵' : ''}${order.isTip ? ' + титул Меценат 💖' : ''}
+⏱ Підтверджено о: ${nowKyiv}`;
+
+          if (cqMsgId) {
+            await fetch(`https://api.telegram.org/bot${TOKEN}/editMessageText`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                chat_id: cqChat,
+                message_id: cqMsgId,
+                text: editedAdminText,
+                parse_mode: 'HTML',
+              }),
+            }).catch(() => null);
+          }
+
+          // Notify player
+          try {
+            const playerText =
+`🎉 <b>Вашу оплату замовлення #${order.id} підтверджено!</b>
+
+Дякуємо за підтримку розробника! 💖
+💎 Вам нараховано: <b>+${order.diamonds} 💎</b>${order.isStarter ? '\n🪵 Отримано зброю «Бойова скалка» проти босів!' : ''}${order.isTip ? '\n💖 Присвоєно особливий титул «Меценат» у профілі!' : ''}
+
+Відкрийте гру, щоб отримати нагороду!`;
+
+            await fetch(`https://api.telegram.org/bot${TOKEN}/sendMessage`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                chat_id: Number(order.userId),
+                text: playerText,
+                parse_mode: 'HTML',
+                reply_markup: {
+                  inline_keyboard: [[{ text: '🫓 Відкрити Фокача Клікер', web_app: { url: WEBAPP_URL } }]],
+                },
+              }),
+            });
+          } catch (e) {
+            console.error('Notify player error:', e);
+          }
+
+          await fetch(`https://api.telegram.org/bot${TOKEN}/answerCallbackQuery`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ callback_query_id: cq.id, text: `✅ Замовлення #${order.id} успішно підтверджено! +${order.diamonds} 💎` }),
+          });
+
+          return res.status(200).json({ ok: true });
+        }
+
+        if (action === 'order_no') {
+          order.status = 'rejected';
+          order.rejectedAt = Date.now();
+          await redis('SET', `order:${orderId}`, JSON.stringify(order), 'EX', 172800);
+
+          const editedAdminText =
+`❌ <b>ЗАМОВЛЕННЯ #${order.id} ВІДХИЛЕНО</b>
+
+👤 Гравець: ${order.username ? '@' + order.username : order.userId} (ID: <code>${order.userId}</code>)
+📦 Товар: <b>${order.title}</b>
+💵 Сума: <b>${order.amountUah} ₴</b>
+<i>Нагороду не нараховано.</i>`;
+
+          if (cqMsgId) {
+            await fetch(`https://api.telegram.org/bot${TOKEN}/editMessageText`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                chat_id: cqChat,
+                message_id: cqMsgId,
+                text: editedAdminText,
+                parse_mode: 'HTML',
+              }),
+            }).catch(() => null);
+          }
+
+          try {
+            await fetch(`https://api.telegram.org/bot${TOKEN}/sendMessage`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                chat_id: Number(order.userId),
+                text: `⚠️ <b>Замовлення #${order.id} відхилено</b>\n\nКошти не надійшли на Банку або не було вказано коментар із номером замовлення.\nЯкщо ви оплатили, зв'яжіться з автором гри через підтримку!`,
+                parse_mode: 'HTML',
+              }),
+            });
+          } catch (e) {}
+
+          await fetch(`https://api.telegram.org/bot${TOKEN}/answerCallbackQuery`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ callback_query_id: cq.id, text: `❌ Замовлення #${order.id} відхилено.` }),
+          });
+
+          return res.status(200).json({ ok: true });
+        }
       }
 
       // Закрити панель — просто видалити повідомлення
