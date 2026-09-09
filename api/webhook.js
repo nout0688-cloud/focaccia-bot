@@ -288,6 +288,58 @@ function formatKyivDate(ts) {
   });
 }
 
+function computeKyivScheduledTime(targetHour, targetMinute, dayOffset = 0) {
+  const now = new Date();
+  const kNowStr = now.toLocaleString('en-US', { timeZone: 'Europe/Kyiv', hourCycle: 'h23' });
+  const kDate = new Date(kNowStr);
+  
+  const target = new Date(kDate);
+  target.setDate(target.getDate() + dayOffset);
+  target.setHours(targetHour, targetMinute, 0, 0);
+
+  const diffMs = target.getTime() - kDate.getTime();
+  return now.getTime() + diffMs;
+}
+
+function parseCustomKyivTime(input) {
+  const text = String(input || '').trim();
+  const now = new Date();
+  const kNowStr = now.toLocaleString('en-US', { timeZone: 'Europe/Kyiv', hourCycle: 'h23' });
+  const kDate = new Date(kNowStr);
+
+  const plusMatch = text.match(/^\+?\s*(\d+(?:\.\d+)?)\s*(?:h|год|годин|ч|час)?$/i);
+  if (plusMatch && text.startsWith('+')) {
+    const hours = parseFloat(plusMatch[1]);
+    if (!isNaN(hours) && hours > 0) {
+      return now.getTime() + Math.round(hours * 3600 * 1000);
+    }
+  }
+
+  const isTomorrow = /завтра|tomorrow/i.test(text);
+  const cleanTime = text.replace(/завтра|сьогодні|tomorrow|today/gi, '').trim();
+
+  const timeMatch = cleanTime.match(/^(\d{1,2})[:.\s](\d{2})$/) || cleanTime.match(/^(\d{1,2})$/);
+  if (timeMatch) {
+    const targetHour = parseInt(timeMatch[1], 10);
+    const targetMinute = timeMatch[2] ? parseInt(timeMatch[2], 10) : 0;
+    if (targetHour >= 0 && targetHour <= 23 && targetMinute >= 0 && targetMinute <= 59) {
+      const target = new Date(kDate);
+      target.setHours(targetHour, targetMinute, 0, 0);
+
+      if (target.getTime() <= kDate.getTime() && !/сьогодні|today/i.test(text)) {
+        target.setDate(target.getDate() + 1);
+      } else if (isTomorrow) {
+        target.setDate(target.getDate() + 1);
+      }
+
+      const diffMs = target.getTime() - kDate.getTime();
+      return now.getTime() + diffMs;
+    }
+  }
+
+  return null;
+}
+
 async function getContestDraft(adminId) {
   const dRaw = await redis('GET', `contest_draft:${adminId}`);
   if (dRaw?.result) {
@@ -298,6 +350,7 @@ async function getContestDraft(adminId) {
         amount: d.amount || 10000000,
         winners: d.winners || 3,
         durationHours: d.durationHours || 24,
+        scheduledStartTime: d.scheduledStartTime || null,
         builderMsgId: d.builderMsgId || null,
       };
     } catch { /* */ }
@@ -307,6 +360,7 @@ async function getContestDraft(adminId) {
     amount: 10000000,
     winners: 3,
     durationHours: 24,
+    scheduledStartTime: null,
     builderMsgId: null,
   };
 }
@@ -316,10 +370,15 @@ async function setContestDraft(adminId, draft) {
 }
 
 function renderBuilderMessage(draft) {
-  const endTs = Date.now() + Math.round((draft.durationHours || 24) * 3600 * 1000);
+  const isScheduled = draft.scheduledStartTime && draft.scheduledStartTime > Date.now() + 60000;
+  const startTs = isScheduled ? draft.scheduledStartTime : Date.now();
+  const endTs = startTs + Math.round((draft.durationHours || 24) * 3600 * 1000);
   const totalPrize = (draft.amount || 10000000) * (draft.winners || 3);
   const totalFormatted = formatContestCur(draft.cur, totalPrize);
   const singleFormatted = formatContestCur(draft.cur, draft.amount || 10000000);
+  const startDisplay = isScheduled
+    ? `📅 ${formatKyivDate(draft.scheduledStartTime)} (Київ)`
+    : '⚡ Зараз (миттєво)';
 
   const text =
     `🛠 *БІЛДЕР КОНКУРСУ* 🎁\n\n` +
@@ -327,16 +386,23 @@ function renderBuilderMessage(draft) {
     `🎁 *Приз кожному:* ${singleFormatted}\n` +
     `👥 *Кількість переможців:* ${draft.winners || 3} гравців\n` +
     `⏱ *Тривалість:* ${formatDurationHours(draft.durationHours || 24)}\n` +
-    `📅 *Результати орієнтовно:* ${formatKyivDate(endTs)} (за Києвом)\n` +
+    `📅 *Час старту:* ${startDisplay}\n` +
+    `🏁 *Підбиття підсумків:* ${formatKyivDate(endTs)} (за Києвом)\n` +
     `💰 *Загальний призовий фонд:* ${totalFormatted}\n\n` +
-    `👇 *Оберіть параметр, який бажаєте змінити:*`;
+    (isScheduled
+      ? `⏰ *Статус:* Заплановано. Після підтвердження бот автоматично опублікує конкурс у зазначений час без вашої присутності!`
+      : `👇 *Оберіть параметр, який бажаєте змінити:*`);
 
   const reply_markup = {
     inline_keyboard: [
       [{ text: `🎁 Змінити приз (${singleFormatted})`, callback_data: 'concurs:menu:prize' }],
       [{ text: `👥 Змінити переможців (${draft.winners || 3})`, callback_data: 'concurs:menu:winners' }],
-      [{ text: `⏱ Змінити час (${formatDurationHours(draft.durationHours || 24)})`, callback_data: 'concurs:menu:duration' }],
-      [{ text: '🚀 Опублікувати конкурс усім гравцям', callback_data: 'concurs:publish' }],
+      [{ text: `⏱ Змінити тривалість (${formatDurationHours(draft.durationHours || 24)})`, callback_data: 'concurs:menu:duration' }],
+      [{ text: `📅 Старт: ${startDisplay}`, callback_data: 'concurs:menu:schedule' }],
+      [{
+        text: isScheduled ? '⏰ Запланувати розіграш' : '🚀 Опублікувати конкурс усім гравцям',
+        callback_data: 'concurs:publish'
+      }],
       [
         { text: '⬅️ До адмінки', callback_data: 'admin:back' },
         { text: '❌ Закрити білдер', callback_data: 'concurs:close' },
@@ -345,6 +411,55 @@ function renderBuilderMessage(draft) {
   };
 
   return { text, parse_mode: 'Markdown', reply_markup };
+}
+
+function renderScheduleMenu(draft) {
+  const isScheduled = draft.scheduledStartTime && draft.scheduledStartTime > Date.now() + 60000;
+  const currentStart = isScheduled
+    ? `Заплановано на ${formatKyivDate(draft.scheduledStartTime)} (за Києвом)`
+    : '⚡ Зараз (одразу після публікації)';
+
+  const text =
+    `📅 *ЧАС ЗАПУСКУ РОЗІГРАШУ*\n\n` +
+    `Поточний старт: *${currentStart}*\n\n` +
+    `Оберіть, коли конкурс має автоматично розпочатися:\n` +
+    `• *Завтра о 15:00* — бот автоматично запустить конкурс завтра о 15:00 за Києвом (навіть якщо ви не за ПК!)\n` +
+    `• *Зараз* — конкурс опублікується миттєво після збереження\n` +
+    `• Або оберіть інший час чи введіть свій:`;
+
+  const rows = [
+    [
+      { text: !isScheduled ? '🔘 ⚡ Зараз (миттєво)' : '⚡ Зараз (миттєво)', callback_data: 'concurs:set_sched:now' },
+    ],
+    [
+      { text: '☀️ Завтра о 15:00 (Київ)', callback_data: 'concurs:set_sched:tomorrow_15' },
+      { text: '🌅 Завтра о 12:00 (Київ)', callback_data: 'concurs:set_sched:tomorrow_12' },
+    ],
+    [
+      { text: '🌇 Завтра о 18:00 (Київ)', callback_data: 'concurs:set_sched:tomorrow_18' },
+      { text: '🌙 Завтра о 21:00 (Київ)', callback_data: 'concurs:set_sched:tomorrow_21' },
+    ],
+    [
+      { text: '⏱ +1 год', callback_data: 'concurs:set_sched:plus_1' },
+      { text: '⏱ +3 год', callback_data: 'concurs:set_sched:plus_3' },
+      { text: '⏱ +6 год', callback_data: 'concurs:set_sched:plus_6' },
+      { text: '⏱ +12 год', callback_data: 'concurs:set_sched:plus_12' },
+    ],
+    [
+      { text: '✍️ Вказати власний час (ГГ:ХХ або +годин)', callback_data: 'concurs:custom_schedule' },
+    ],
+    [
+      { text: '⬅️ Назад до білдера', callback_data: 'concurs:back' },
+    ],
+  ];
+
+  return {
+    text,
+    parse_mode: 'Markdown',
+    reply_markup: {
+      inline_keyboard: rows,
+    },
+  };
 }
 
 function renderPrizeMenu(draft) {
@@ -557,7 +672,9 @@ async function publishContest(TOKEN, adminChatId, draft) {
   const contestId = 'c_' + Date.now();
   const durationHours = draft.durationHours || 24;
   const durationMs = Math.round(durationHours * 3600 * 1000);
-  const startTime = Date.now();
+  const isScheduled = draft.scheduledStartTime && draft.scheduledStartTime > Date.now() + 60000;
+  const scheduledStartTime = isScheduled ? draft.scheduledStartTime : null;
+  const startTime = isScheduled ? scheduledStartTime : Date.now();
   const endTime = startTime + durationMs;
 
   const contestObj = {
@@ -568,18 +685,47 @@ async function publishContest(TOKEN, adminChatId, draft) {
     durationHours,
     startTime,
     endTime,
-    status: 'active',
+    status: isScheduled ? 'scheduled' : 'active',
+    scheduledStartTime,
     creatorId: String(adminChatId),
+    announced: !isScheduled,
   };
 
   await redis('HSET', 'contest:' + contestId, 'data', JSON.stringify(contestObj));
-  await redis('SADD', 'active_contests', contestId);
   await redis('SADD', 'all_contests', contestId);
   await redis('LPUSH', 'history_contests', contestId);
 
   const singlePrize = formatContestCur(draft.cur, draft.amount);
   const totalPrize = formatContestCur(draft.cur, draft.amount * draft.winners);
   const endFormatted = formatKyivDate(endTime);
+
+  if (isScheduled) {
+    await redis('SADD', 'scheduled_contests', contestId);
+    draft.scheduledStartTime = null;
+    await setContestDraft(adminChatId, draft);
+
+    const startFormatted = formatKyivDate(scheduledStartTime);
+    await sendTg(TOKEN, 'sendMessage', {
+      chat_id: adminChatId,
+      text:
+        `⏰ *РОЗІГРАШ УСПІШНО ЗАПЛАНОВАНО!* 📅\n\n` +
+        `🆔 ID: \`${contestId}\`\n` +
+        `🎁 Приз: *${singlePrize}* кожному\n` +
+        `👥 Переможців: *${draft.winners}*\n` +
+        `⏱ Тривалість: *${formatDurationHours(durationHours)}*\n` +
+        `📅 *Автоматичний старт:* *${startFormatted}* (за Києвом)\n` +
+        `🏁 *Підбиття підсумків:* *${endFormatted}* (за Києвом)\n\n` +
+        `🤖 *Бот автоматично розішле конкурс у зазначений час!* Вам не потрібно бути за ПК.\n\n` +
+        `📋 *Керування:*\n` +
+        `• Запустити негайно: \`/concurs_start ${contestId}\`\n` +
+        `• Скасувати розіграш: \`/concurs_cancel ${contestId}\`\n` +
+        `• Список розіграшів: \`/concurs_list\``,
+      parse_mode: 'Markdown',
+    });
+    return;
+  }
+
+  await redis('SADD', 'active_contests', contestId);
 
   const announceText =
     `🎉 *РОЗІГРАШ У ФОКАЧА КЛІКЕР!* 🎉\n\n` +
@@ -787,6 +933,102 @@ async function checkExpiredContests(TOKEN) {
           }
         } catch { /* skip */ }
       }
+    }
+  } catch { /* ignore */ }
+}
+
+async function launchScheduledContest(TOKEN, contestId, cObj) {
+  if (!contestId) return;
+  if (!cObj) {
+    const raw = (await redis('HGET', 'contest:' + contestId, 'data'))?.result;
+    if (!raw) return;
+    try { cObj = JSON.parse(raw); } catch { return; }
+  }
+
+  cObj.status = 'active';
+  const durationHours = cObj.durationHours || 24;
+  cObj.startTime = Date.now();
+  cObj.endTime = Date.now() + Math.round(durationHours * 3600 * 1000);
+  cObj.announced = true;
+
+  await redis('HSET', 'contest:' + contestId, 'data', JSON.stringify(cObj));
+  await redis('SREM', 'scheduled_contests', contestId);
+  await redis('SADD', 'active_contests', contestId);
+
+  const singlePrize = formatContestCur(cObj.cur, cObj.amount);
+  const totalPrize = formatContestCur(cObj.cur, cObj.amount * cObj.winners);
+  const endFormatted = formatKyivDate(cObj.endTime);
+
+  const announceText =
+    `🎉 *РОЗІГРАШ У ФОКАЧА КЛІКЕР!* 🎉\n\n` +
+    `Пекарня запускає новий конкурс для всіх пекарів!\n\n` +
+    `🎁 *Приз переможцю:* ${singlePrize}\n` +
+    `👥 *Кількість переможців:* ${cObj.winners} гравців\n` +
+    `💰 *Загальний призовий фонд:* ${totalPrize}\n` +
+    `⏱ *Підбиття підсумків:* ${endFormatted} (за Києвом)\n\n` +
+    `👇 *Тисни кнопку нижче, щоб взяти участь у розіграші:*`;
+
+  const contestMarkup = {
+    inline_keyboard: [
+      [{ text: '🎉 Взяти участь (0)', callback_data: `concurs:join:${contestId}` }],
+      [{ text: '🫓 Відкрити Фокача Клікер', web_app: { url: WEBAPP_URL } }],
+    ],
+  };
+
+  const usersData = await redis('HGETALL', 'users');
+  let sentCount = 0;
+  if (usersData?.result && usersData.result.length > 0) {
+    const entries = usersData.result;
+    for (let i = 0; i < entries.length; i += 2) {
+      const uid = entries[i];
+      try {
+        await sendTg(TOKEN, 'sendMessage', {
+          chat_id: Number(uid),
+          text: announceText,
+          parse_mode: 'Markdown',
+          reply_markup: contestMarkup,
+        });
+        sentCount++;
+      } catch { /* skip */ }
+    }
+  }
+
+  if (cObj.creatorId) {
+    await sendTg(TOKEN, 'sendMessage', {
+      chat_id: Number(cObj.creatorId),
+      text:
+        `🚀 *ЗАПЛАНОВАНИЙ КОНКУРС АВТОМАТИЧНО РОЗПОЧАТО!* 🎁\n\n` +
+        `🆔 ID: \`${contestId}\`\n` +
+        `🎁 Приз: *${singlePrize}* кожному (${cObj.winners} перем.)\n` +
+        `📨 Оповіщено гравців: *${sentCount}*\n` +
+        `⏱ Підсумки: *${endFormatted}* (за Києвом)\n\n` +
+        `Керування: \`/concurs_list\``,
+      parse_mode: 'Markdown',
+    });
+  }
+}
+
+async function checkScheduledContests(TOKEN) {
+  try {
+    const schedRes = await redis('SMEMBERS', 'scheduled_contests');
+    if (!schedRes?.result || schedRes.result.length === 0) return;
+    const now = Date.now();
+    for (const cId of schedRes.result) {
+      const cRaw = await redis('HGET', 'contest:' + cId, 'data');
+      if (!cRaw?.result) {
+        await redis('SREM', 'scheduled_contests', cId);
+        continue;
+      }
+      try {
+        const cObj = JSON.parse(cRaw.result);
+        if (cObj.status === 'scheduled') {
+          if (now >= (cObj.scheduledStartTime || cObj.startTime || 0)) {
+            await launchScheduledContest(TOKEN, cId, cObj);
+          }
+        } else {
+          await redis('SREM', 'scheduled_contests', cId);
+        }
+      } catch { /* skip */ }
     }
   } catch { /* ignore */ }
 }
@@ -1174,10 +1416,34 @@ function escapeMd(str) {
 
 async function renderContestsAdminMenu() {
   const activeIds = (await redis('SMEMBERS', 'active_contests'))?.result || [];
+  const scheduledIds = (await redis('SMEMBERS', 'scheduled_contests'))?.result || [];
   let text = `🎁 *РОЗІГРАШІ ТА КОНКУРСИ*\n\n`;
-  text += `Активних розіграшів: *${activeIds.length}*\n\n`;
+  text += `Активних: *${activeIds.length}* | Запланованих: *${scheduledIds.length}*\n\n`;
 
   const contestButtons = [];
+
+  if (scheduledIds.length > 0) {
+    text += `*📅 Заплановані розіграші:*\n`;
+    for (const cId of scheduledIds) {
+      const raw = (await redis('HGET', 'contest:' + cId, 'data'))?.result;
+      if (raw) {
+        try {
+          const c = JSON.parse(raw);
+          const prize = formatContestCur(c.cur, c.amount);
+          const startFmt = formatKyivDate(c.scheduledStartTime || c.startTime);
+          const msToStart = (c.scheduledStartTime || c.startTime) - Date.now();
+          const toStart = msToStart > 0 ? formatDurationHours(Math.max(0.1, msToStart / 3600000)) : 'Запускається...';
+          text += `• *#${cId}*: ${prize} для ${c.winners} перем.\n  📅 Старт: *${startFmt}* (до старту: *${toStart}*)\n`;
+          contestButtons.push([
+            { text: `🚀 Запустити зараз #${cId.slice(-6)}`, callback_data: `admin:concurs_start:${cId}` },
+            { text: `❌ Скасувати #${cId.slice(-6)}`, callback_data: `admin:concurs_cancel:${cId}` },
+          ]);
+        } catch {}
+      }
+    }
+    text += '\n';
+  }
+
   if (activeIds.length > 0) {
     text += `*Список активних конкурсів:*\n`;
     for (const cId of activeIds) {
@@ -1202,8 +1468,8 @@ async function renderContestsAdminMenu() {
       }
     }
     text += '\n';
-  } else {
-    text += `Наразі немає активних розіграшів.\n\n`;
+  } else if (scheduledIds.length === 0) {
+    text += `Наразі немає активних або запланованих розіграшів.\n\n`;
   }
 
   // Останні конкурси з історії (якщо є)
@@ -2497,15 +2763,22 @@ async function handleAdminAwaitInput(TOKEN, chatId, text, awaitData) {
 }
 
 module.exports = async function handler(req, res) {
+  const TOKEN = process.env.BOT_TOKEN;
+
   if (req.method !== 'POST') {
+    if (TOKEN) {
+      await checkScheduledContests(TOKEN).catch(() => {});
+      await checkExpiredContests(TOKEN).catch(() => {});
+    }
     return res.status(200).json({ ok: true, msg: '🫓 Focaccia bot is alive!' });
   }
 
-  const TOKEN = process.env.BOT_TOKEN;
   if (!TOKEN) return res.status(500).json({ error: 'BOT_TOKEN not set' });
 
   // 🧹 Автоматичне видалення застарілих повідомлень налаштування дуелей (>15 хв)
   await cleanupExpiredMessages(TOKEN);
+  // ⏱ Автоматичний запуск запланованих конкурсів
+  await checkScheduledContests(TOKEN);
   // ⏱ Автоматична перевірка та підбиття підсумків активних конкурсів
   await checkExpiredContests(TOKEN);
 
@@ -2905,6 +3178,7 @@ module.exports = async function handler(req, res) {
         if (sub === 'prize') menuData = renderPrizeMenu(draft);
         else if (sub === 'winners') menuData = renderWinnersMenu(draft);
         else if (sub === 'duration') menuData = renderDurationMenu(draft);
+        else if (sub === 'schedule') menuData = renderScheduleMenu(draft);
         else menuData = renderBuilderMessage(draft);
 
         await sendTg(TOKEN, 'sendMessage', { chat_id: cqChat, ...menuData });
@@ -2984,9 +3258,60 @@ module.exports = async function handler(req, res) {
         return res.status(200).json({ ok: true });
       }
 
+      // Час старту конкурсу
+      if (action === 'set_sched') {
+        const type = parts[2];
+        if (type === 'now') {
+          draft.scheduledStartTime = null;
+        } else if (type === 'tomorrow_15') {
+          draft.scheduledStartTime = computeKyivScheduledTime(15, 0, 1);
+        } else if (type === 'tomorrow_12') {
+          draft.scheduledStartTime = computeKyivScheduledTime(12, 0, 1);
+        } else if (type === 'tomorrow_18') {
+          draft.scheduledStartTime = computeKyivScheduledTime(18, 0, 1);
+        } else if (type === 'tomorrow_21') {
+          draft.scheduledStartTime = computeKyivScheduledTime(21, 0, 1);
+        } else if (type === 'plus_1') {
+          draft.scheduledStartTime = Date.now() + 1 * 3600 * 1000;
+        } else if (type === 'plus_3') {
+          draft.scheduledStartTime = Date.now() + 3 * 3600 * 1000;
+        } else if (type === 'plus_6') {
+          draft.scheduledStartTime = Date.now() + 6 * 3600 * 1000;
+        } else if (type === 'plus_12') {
+          draft.scheduledStartTime = Date.now() + 12 * 3600 * 1000;
+        }
+        await setContestDraft(cqChat, draft);
+
+        if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+        await sendTg(TOKEN, 'sendMessage', { chat_id: cqChat, ...renderBuilderMessage(draft) });
+        return res.status(200).json({ ok: true });
+      }
+
+      if (action === 'custom_schedule') {
+        if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+        const promptSent = await sendTg(TOKEN, 'sendMessage', {
+          chat_id: cqChat,
+          text:
+            `✍️ *Введіть бажаний час старту конкурсу:*\n\n` +
+            `Приклади:\n` +
+            `• \`15:00\` (або \`завтра 15:00\`)\n` +
+            `• \`19:30\`\n` +
+            `• \`+4\` (через 4 години)\n\n` +
+            `🇺🇦 Розрахунок за Київським часом (${formatKyivDate(Date.now())})`,
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [[{ text: '⬅️ Назад до білдера', callback_data: 'concurs:back' }]],
+          },
+        });
+        const promptMsgId = promptSent?.result?.message_id || '1';
+        await redis('SET', `concurs_await_sched:${cqChat}`, String(promptMsgId), 'EX', 300);
+        return res.status(200).json({ ok: true });
+      }
+
       // Кнопка назад: видаляємо поточне підменю, відправляємо білдер
       if (action === 'back') {
         await redis('DEL', `concurs_await_amount:${cqChat}`);
+        await redis('DEL', `concurs_await_sched:${cqChat}`);
         if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
         await sendTg(TOKEN, 'sendMessage', { chat_id: cqChat, ...renderBuilderMessage(draft) });
         return res.status(200).json({ ok: true });
@@ -3599,6 +3924,16 @@ module.exports = async function handler(req, res) {
         return res.status(200).json({ ok: true });
       }
 
+      // Достроковий запуск запланованого конкурсу
+      if (action === 'concurs_start') {
+        const contestId = targetId;
+        if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+        await launchScheduledContest(TOKEN, contestId);
+        const menu = await renderContestsAdminMenu();
+        await sendTg(TOKEN, 'sendMessage', { chat_id: cqChat, ...menu });
+        return res.status(200).json({ ok: true });
+      }
+
       // Дострокове завершення конкурсу
       if (action === 'concurs_finish') {
         const contestId = targetId;
@@ -3621,6 +3956,7 @@ module.exports = async function handler(req, res) {
           cObj.cancelledAt = Date.now();
           await redis('HSET', 'contest:' + contestId, 'data', JSON.stringify(cObj));
           await redis('SREM', 'active_contests', contestId);
+          await redis('SREM', 'scheduled_contests', contestId);
         }
         const menu = await renderContestsAdminMenu();
         await sendTg(TOKEN, 'sendMessage', { chat_id: cqChat, ...menu });
@@ -3722,6 +4058,29 @@ module.exports = async function handler(req, res) {
       if (!isNaN(num) && num > 0) {
         draft.amount = num;
         await setContestDraft(chatId, draft);
+      }
+      await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, ...renderBuilderMessage(draft) });
+      return res.status(200).json({ ok: true });
+    }
+
+    // 🎁 Очікування введення власного часу для конкурсу
+    const contestSchedAwait = await redis('GET', `concurs_await_sched:${chatId}`);
+    if (contestSchedAwait?.result && isAdmin(userId)) {
+      await redis('DEL', `concurs_await_sched:${chatId}`);
+      const promptId = Number(contestSchedAwait.result);
+      if (promptId) await deleteTg(TOKEN, chatId, promptId);
+      if (msg.message_id) await deleteTg(TOKEN, chatId, msg.message_id);
+
+      const draft = await getContestDraft(chatId);
+      const parsedTs = parseCustomKyivTime(text);
+      if (parsedTs && parsedTs > Date.now() + 60000) {
+        draft.scheduledStartTime = parsedTs;
+        await setContestDraft(chatId, draft);
+      } else {
+        await sendTg(TOKEN, 'sendMessage', {
+          chat_id: chatId,
+          text: `⚠️ Не вдалося розпізнати час або вказаний час уже минув. Спробуйте формат \`15:00\` або \`+3\`.`,
+        });
       }
       await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, ...renderBuilderMessage(draft) });
       return res.status(200).json({ ok: true });
@@ -4717,51 +5076,132 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: true });
     }
 
-    // ===== /concurs_list — список активних розіграшів =====
+    // ===== /concurs_list — список активних та запланованих розіграшів =====
     if (
       cmd === '/concurs_list' || cmd === 'concurs_list' ||
       cmd === '/contest_list' || cmd === 'contest_list' ||
       cmd === 'конкурси'
     ) {
+      await checkScheduledContests(TOKEN);
+      await checkExpiredContests(TOKEN);
+
       const activeRes = await redis('SMEMBERS', 'active_contests');
       const activeIds = activeRes?.result || [];
 
-      if (activeIds.length === 0) {
+      const schedRes = await redis('SMEMBERS', 'scheduled_contests');
+      const schedIds = schedRes?.result || [];
+
+      if (activeIds.length === 0 && schedIds.length === 0) {
         await sendTg(TOKEN, 'sendMessage', {
           chat_id: chatId,
-          text: '🎁 Наразі немає активних розіграшів.\n\nСтворити новий: `/concurs`',
+          text: '🎁 Наразі немає активних або запланованих розіграшів.\n\nСтворити новий: `/concurs`',
           parse_mode: 'Markdown',
         });
         return res.status(200).json({ ok: true });
       }
 
-      let textRes = `📋 *АКТИВНІ РОЗІГРАШІ (${activeIds.length}):*\n\n`;
-      for (const cId of activeIds) {
-        const cRaw = await redis('HGET', 'contest:' + cId, 'data');
-        if (!cRaw?.result) continue;
-        try {
-          const cObj = JSON.parse(cRaw.result);
-          const pCard = await redis('SCARD', 'contest:' + cId + ':participants');
-          const pCount = pCard?.result || 0;
-          const curFmt = formatContestCur(cObj.cur, cObj.amount);
-          const endFmt = formatKyivDate(cObj.endTime);
-          const msLeft = cObj.endTime - Date.now();
-          const timeLeft = msLeft > 0 ? formatDurationHours(Math.max(0.1, msLeft / 3600000)) : 'Завершується...';
+      let textRes = `📋 *РОЗІГРАШІ ТА КОНКУРСИ:*\n\n`;
 
-          textRes +=
-            `🔹 ID: \`${cId}\`\n` +
-            `🎁 Приз: *${curFmt}* кожному\n` +
-            `👥 Переможців: *${cObj.winners}* | Учасників: *${pCount}*\n` +
-            `⏱ Залишилось: *${timeLeft}* (до ${endFmt})\n` +
-            `👥 Учасники: \`/concurs_users ${cId}\`\n` +
-            `⚙️ Завершити: \`/concurs_finish ${cId}\`\n` +
-            `❌ Скасувати: \`/concurs_cancel ${cId}\`\n\n`;
-        } catch { /* skip */ }
+      if (schedIds.length > 0) {
+        textRes += `📅 *ЗАПЛАНОВАНІ РОЗІГРАШІ (${schedIds.length}):*\n`;
+        for (const cId of schedIds) {
+          const cRaw = await redis('HGET', 'contest:' + cId, 'data');
+          if (!cRaw?.result) continue;
+          try {
+            const cObj = JSON.parse(cRaw.result);
+            const curFmt = formatContestCur(cObj.cur, cObj.amount);
+            const startFmt = formatKyivDate(cObj.scheduledStartTime || cObj.startTime);
+            const msToStart = (cObj.scheduledStartTime || cObj.startTime) - Date.now();
+            const toStart = msToStart > 0 ? formatDurationHours(Math.max(0.1, msToStart / 3600000)) : 'Запускається...';
+
+            textRes +=
+              `🔹 ID: \`${cId}\`\n` +
+              `🎁 Приз: *${curFmt}* для ${cObj.winners} перем.\n` +
+              `📅 Старт: *${startFmt}* (за Києвом)\n` +
+              `⏱ До старту: *${toStart}*\n` +
+              `🚀 Запустити зараз: \`/concurs_start ${cId}\`\n` +
+              `❌ Скасувати: \`/concurs_cancel ${cId}\`\n\n`;
+          } catch {}
+        }
+      }
+
+      if (activeIds.length > 0) {
+        textRes += `🚀 *АКТИВНІ РОЗІГРАШІ (${activeIds.length}):*\n`;
+        for (const cId of activeIds) {
+          const cRaw = await redis('HGET', 'contest:' + cId, 'data');
+          if (!cRaw?.result) continue;
+          try {
+            const cObj = JSON.parse(cRaw.result);
+            const pCard = await redis('SCARD', 'contest:' + cId + ':participants');
+            const pCount = pCard?.result || 0;
+            const curFmt = formatContestCur(cObj.cur, cObj.amount);
+            const endFmt = formatKyivDate(cObj.endTime);
+            const msLeft = cObj.endTime - Date.now();
+            const timeLeft = msLeft > 0 ? formatDurationHours(Math.max(0.1, msLeft / 3600000)) : 'Завершується...';
+
+            textRes +=
+              `🔹 ID: \`${cId}\`\n` +
+              `🎁 Приз: *${curFmt}* кожному\n` +
+              `👥 Переможців: *${cObj.winners}* | Учасників: *${pCount}*\n` +
+              `⏱ Залишилось: *${timeLeft}* (до ${endFmt})\n` +
+              `👥 Учасники: \`/concurs_users ${cId}\`\n` +
+              `⚙️ Завершити: \`/concurs_finish ${cId}\`\n` +
+              `❌ Скасувати: \`/concurs_cancel ${cId}\`\n\n`;
+          } catch { /* skip */ }
+        }
       }
 
       await sendTg(TOKEN, 'sendMessage', {
         chat_id: chatId,
         text: textRes,
+        parse_mode: 'Markdown',
+      });
+      return res.status(200).json({ ok: true });
+    }
+
+    // ===== /concurs_start <id> — запустити запланований розіграш достроково =====
+    if (
+      cmd.startsWith('/concurs_start') || cmd.startsWith('concurs_start') ||
+      cmd.startsWith('/contest_start') || cmd.startsWith('contest_start')
+    ) {
+      const parts = text.split(/\s+/);
+      const targetId = parts[1]?.trim();
+
+      if (!targetId) {
+        await sendTg(TOKEN, 'sendMessage', {
+          chat_id: chatId,
+          text: '❌ Вкажіть ID конкурсу для запуску:\nПриклад: `/concurs_start c_1712345678901`\n\nСписок: `/concurs_list`',
+          parse_mode: 'Markdown',
+        });
+        return res.status(200).json({ ok: true });
+      }
+
+      const cRaw = await redis('HGET', 'contest:' + targetId, 'data');
+      if (!cRaw?.result) {
+        await sendTg(TOKEN, 'sendMessage', {
+          chat_id: chatId,
+          text: `❌ Конкурс з ID \`${targetId}\` не знайдено.`,
+          parse_mode: 'Markdown',
+        });
+        return res.status(200).json({ ok: true });
+      }
+
+      let cObj = {};
+      try { cObj = JSON.parse(cRaw.result); } catch {}
+
+      if (cObj.status === 'active') {
+        await sendTg(TOKEN, 'sendMessage', {
+          chat_id: chatId,
+          text: `ℹ️ Цей конкурс уже активний!`,
+          parse_mode: 'Markdown',
+        });
+        return res.status(200).json({ ok: true });
+      }
+
+      await launchScheduledContest(TOKEN, targetId, cObj);
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: `🚀 Конкурс \`${targetId}\` успішно запущено прямо зараз!`,
         parse_mode: 'Markdown',
       });
       return res.status(200).json({ ok: true });
@@ -4866,6 +5306,7 @@ module.exports = async function handler(req, res) {
       cObj.cancelledAt = Date.now();
       await redis('HSET', 'contest:' + targetId, 'data', JSON.stringify(cObj));
       await redis('SREM', 'active_contests', targetId);
+      await redis('SREM', 'scheduled_contests', targetId);
 
       await sendTg(TOKEN, 'sendMessage', {
         chat_id: chatId,
