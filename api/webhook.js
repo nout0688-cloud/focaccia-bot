@@ -3,7 +3,7 @@
  * Webhook + Admin panel для user ID 1975429762
  */
 
-const WEBAPP_URL = 'https://nout0688-cloud.github.io/focaccia-clicker/?v=1.3.1';
+const WEBAPP_URL = 'https://nout0688-cloud.github.io/focaccia-clicker/?v=1.3.2';
 const ADMIN_ID = process.env.ADMIN_ID ? parseInt(process.env.ADMIN_ID, 10) : 1975429762;
 
 async function redis(...args) {
@@ -823,12 +823,15 @@ async function getAdminPanelMessage() {
   }
   const activeContestsData = await redis('SMEMBERS', 'active_contests');
   const contestCount = activeContestsData?.result?.length || 0;
+  const dNickData = await redis('HGET', 'config', 'donatello_nickname');
+  const dNick = dNickData?.result || 'не налаштовано';
 
   const text =
     `👑 *ГОЛОВНА АДМІН ПАНЕЛЬ*\n\n` +
     `👥 Гравців у базі: *${userCount}*\n` +
     `⚠️ Детектів античиту: *${flagCount}*\n` +
-    `🎁 Активних конкурсів: *${contestCount}*\n\n` +
+    `🎁 Активних конкурсів: *${contestCount}*\n` +
+    `💳 Donatello: *${dNick}*\n\n` +
     `👇 *Оберіть дію або розділ керування:*`;
 
   const reply_markup = {
@@ -854,12 +857,41 @@ async function getAdminPanelMessage() {
         { text: '🎉 Конкурси', callback_data: 'admin:menu:contests' },
       ],
       [
+        { text: '💳 Донат Donatello', callback_data: 'admin:menu:donatello' },
         { text: '🏆 Очистити топ', callback_data: 'admin:menu:lb_clear' },
-        { text: '⚠️ Скинути акаунт', callback_data: 'admin:menu:reset' },
       ],
       [
+        { text: '⚠️ Скинути акаунт', callback_data: 'admin:menu:reset' },
         { text: '❌ Закрити панель', callback_data: 'admin:close' },
       ],
+    ],
+  };
+
+  return { text, parse_mode: 'Markdown', reply_markup };
+}
+
+async function renderDonatelloMenu() {
+  const nickData = await redis('HGET', 'config', 'donatello_nickname');
+  const tokenData = await redis('HGET', 'config', 'donatello_token');
+  const dNick = nickData?.result || 'не налаштовано';
+  const hasToken = !!tokenData?.result;
+
+  const text =
+    `💳 *НАЛАШТУВАННЯ DONATELLO.TO*\n\n` +
+    `👤 Нікнейм сторінки: *${dNick}*\n` +
+    `🔑 API Токен: *${hasToken ? '✅ Підключено' : '❌ Не налаштовано'}*\n` +
+    `🔗 Посилання на донати: ${dNick !== 'не налаштовано' ? `https://donatello.to/${dNick}` : '—'}\n\n` +
+    `📝 *Як налаштувати:*\n` +
+    `1. Зареєструйся на [donatello.to](https://donatello.to) (через Google)\n` +
+    `2. Твій нікнейм видно у посиланні на твою сторінку\n` +
+    `3. В кабінеті Donatello перейди в розділ API та скопіюй токен\n` +
+    `4. Надішли сюди команду:\n` +
+    `\`/setdonatello <нікнейм> <токен>\`\n\n` +
+    `_Приклад: \`/setdonatello mygame abc123def456\`_`;
+
+  const reply_markup = {
+    inline_keyboard: [
+      [{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }],
     ],
   };
 
@@ -3051,6 +3083,7 @@ module.exports = async function handler(req, res) {
         else if (sub === 'anticheat') menuData = await renderAnticheatMenu();
         else if (sub === 'contests') menuData = await renderContestsAdminMenu();
         else if (sub === 'reset') menuData = renderResetMenu();
+        else if (sub === 'donatello') menuData = await renderDonatelloMenu();
         else if (sub === 'lb_clear') menuData = renderLbClearConfirm();
         else menuData = await getAdminPanelMessage();
 
@@ -3644,6 +3677,33 @@ module.exports = async function handler(req, res) {
 
     // ===== ADMIN COMMANDS =====
     if (!isAdmin(userId)) {
+      return res.status(200).json({ ok: true });
+    }
+
+    // /setdonatello <nickname> <token>
+    if (cmd.startsWith('/setdonatello') || cmd.startsWith('setdonatello')) {
+      const rawArgs = text.replace(/^\/?setdonatello\s*/i, '').trim();
+      const args = rawArgs.split(/\s+/);
+      const nick = args[0] ? args[0].replace(/^https?:\/\/(?:www\.)?donatello\.to\//i, '').replace(/[^a-zA-Z0-9_-]/g, '') : '';
+      const tok = args[1] || '';
+
+      if (!nick || !tok) {
+        await sendTg(TOKEN, 'sendMessage', {
+          chat_id: chatId,
+          text: '❌ *Використання:* `/setdonatello <нікнейм> <токен>`\n\nПриклад:\n`/setdonatello mygame abc123xyz`\n\nДе взяти:\n1. Зареєструйся на [donatello.to](https://donatello.to)\n2. Скопіюй свій нікнейм та токен у розділі API.',
+          parse_mode: 'Markdown',
+        });
+        return res.status(200).json({ ok: true });
+      }
+
+      await redis('HSET', 'config', 'donatello_nickname', nick);
+      await redis('HSET', 'config', 'donatello_token', tok);
+
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: `✅ *Donatello успішно налаштовано!*\n\n👤 Нікнейм: *${nick}*\n🔑 Токен: *збережено*\n🔗 Посилання: https://donatello.to/${nick}\n\nГравці тепер можуть донатити картками України та Apple Pay у грі! 🇺🇦✨`,
+        parse_mode: 'Markdown',
+      });
       return res.status(200).json({ ok: true });
     }
 

@@ -43,6 +43,18 @@ const PACKAGES = {
   },
 };
 
+async function redis(...args) {
+  const url = process.env.KV_REST_API_URL;
+  const token = process.env.KV_REST_API_TOKEN;
+  if (!url || !token) return null;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(args),
+  });
+  return res.json();
+}
+
 module.exports = async function handler(req, res) {
   // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -51,6 +63,17 @@ module.exports = async function handler(req, res) {
 
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
+  }
+
+  // GET: return config and packages
+  if (req.method === 'GET' && !req.query.packageId) {
+    const nickData = await redis('HGET', 'config', 'donatello_nickname');
+    const donatelloNickname = nickData?.result || process.env.DONATELLO_NICKNAME || '';
+    return res.status(200).json({
+      ok: true,
+      packages: PACKAGES,
+      donatelloNickname,
+    });
   }
 
   const TOKEN = process.env.BOT_TOKEN;
