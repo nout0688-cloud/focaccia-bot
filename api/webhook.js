@@ -3,7 +3,7 @@
  * Webhook + Admin panel для user ID 1975429762
  */
 
-const WEBAPP_URL = 'https://nout0688-cloud.github.io/focaccia-clicker/?v=1.2.8';
+const WEBAPP_URL = 'https://nout0688-cloud.github.io/focaccia-clicker/?v=1.2.9';
 const ADMIN_ID = process.env.ADMIN_ID ? parseInt(process.env.ADMIN_ID, 10) : 1975429762;
 
 async function redis(...args) {
@@ -1566,6 +1566,52 @@ async function renderUserCard(target) {
   return { text, parse_mode: 'Markdown', reply_markup };
 }
 
+function formatAcLogTxt(target, targetChatId, karma, totalDetects, strikes, logs) {
+  let txt = `=== TAPSENTINEL DEBUG LOG ===\n`;
+  txt += `Гравець: ${target.name} (${target.display})\n`;
+  txt += `ID: ${targetChatId}\n`;
+  txt += `Карма: ${karma}/100\n`;
+  txt += `Всього детектів: ${totalDetects}\n`;
+  txt += `Дата звіту: ${new Date().toISOString()}\n`;
+  txt += `\n=== СТРАЙКИ (timestamps) ===\n`;
+  if (!strikes || strikes.length === 0) {
+    txt += `(немає)\n`;
+  } else {
+    strikes.forEach((ts, i) => {
+      txt += `  Strike ${i + 1}: ${new Date(ts).toISOString()}\n`;
+    });
+  }
+
+  txt += `\n=== ДЕБАГ ДЕТЕКТІВ (останні ${logs ? logs.length : 0}) ===\n`;
+  if (!logs || logs.length === 0) {
+    txt += `(немає записів)\n`;
+  } else {
+    logs.forEach((entry, i) => {
+      txt += `\n--- Detect ${i + 1}${entry.type ? ` [${entry.type}]` : ''} ---\n`;
+      txt += `  Час: ${entry.ts ? new Date(entry.ts).toISOString() : 'N/A'}\n`;
+      if (entry.reason) txt += `  Причина:        ${entry.reason}\n`;
+      if (entry.ratePerSec) txt += `  Швидкість:      ${entry.ratePerSec} кл/с (${entry.dClicks} кл за ${entry.dSec}с)\n`;
+      if (entry.karmaAfter !== undefined) txt += `  Карма після:    ${entry.karmaAfter}/100\n`;
+      if (entry.R !== undefined) txt += `  R (ритм):       ${entry.R}/100\n`;
+      if (entry.C !== undefined) txt += `  C (координати): ${entry.C}/100\n`;
+      if (entry.B !== undefined) txt += `  B (поведінка):  ${entry.B}/100\n`;
+      if (entry.H !== undefined) txt += `  H (людяність):  ${entry.H}/100\n`;
+      if (entry.evidence !== undefined) txt += `  Evidence:       ${entry.evidence}\n`;
+      if (entry.suspicion !== undefined) txt += `  Suspicion:      ${entry.suspicion}\n`;
+      if (entry.independentSignals !== undefined) txt += `  Indep. signals: ${entry.independentSignals}\n`;
+      if (entry.strongRatio !== undefined) txt += `  Strong ratio:   ${entry.strongRatio}\n`;
+      if (entry.veryStrongRatio !== undefined) txt += `  VStrong ratio:  ${entry.veryStrongRatio}\n`;
+      if (entry.metronome !== undefined) txt += `  Metronome:      ${entry.metronome}\n`;
+      if (entry.cv40 !== undefined) txt += `  CV40:           ${entry.cv40}\n`;
+      if (entry.extremeSpeedBoost !== undefined) txt += `  ExtremeBoost:   ${entry.extremeSpeedBoost}\n`;
+      if (entry.taps40count !== undefined) txt += `  Taps (40):      ${entry.taps40count}\n`;
+      if (entry.taps300count !== undefined) txt += `  Taps (300):     ${entry.taps300count}\n`;
+      if (entry.ivs40) txt += `  Інтервали (мс): ${entry.ivs40}\n`;
+    });
+  }
+  return txt;
+}
+
 async function sendAcLogDocument(TOKEN, chatId, target) {
   const targetChatId = target.id;
   const targetUsername = target.username || targetChatId;
@@ -1585,45 +1631,7 @@ async function sendAcLogDocument(TOKEN, chatId, target) {
   const sRaw = await redis('HGET', 'ac_strikes', targetChatId);
   if (sRaw?.result) { try { strikes = JSON.parse(sRaw.result); } catch { strikes = []; } }
 
-  let txt = `=== TAPSENTINEL DEBUG LOG ===\n`;
-  txt += `Гравець: ${target.name} (${target.display})\n`;
-  txt += `ID: ${targetChatId}\n`;
-  txt += `Карма: ${karma}/100\n`;
-  txt += `Всього детектів: ${totalDetects}\n`;
-  txt += `Дата звіту: ${new Date().toISOString()}\n`;
-  txt += `\n=== СТРАЙКИ (timestamps) ===\n`;
-  if (strikes.length === 0) {
-    txt += `(немає)\n`;
-  } else {
-    strikes.forEach((ts, i) => {
-      txt += `  Strike ${i + 1}: ${new Date(ts).toISOString()}\n`;
-    });
-  }
-
-  txt += `\n=== ДЕБАГ ДЕТЕКТІВ (останні ${logs.length}) ===\n`;
-  if (logs.length === 0) {
-    txt += `(немає записів)\n`;
-  } else {
-    logs.forEach((entry, i) => {
-      txt += `\n--- Detect ${i + 1} ---\n`;
-      txt += `  Час: ${entry.ts ? new Date(entry.ts).toISOString() : 'N/A'}\n`;
-      txt += `  R (ритм):     ${entry.R ?? '?'}/100\n`;
-      txt += `  C (координати): ${entry.C ?? '?'}/100\n`;
-      txt += `  B (поведінка):  ${entry.B ?? '?'}/100\n`;
-      txt += `  H (людяність):  ${entry.H ?? '?'}/100\n`;
-      txt += `  Evidence:       ${entry.evidence ?? '?'}\n`;
-      txt += `  Suspicion:      ${entry.suspicion ?? '?'}\n`;
-      txt += `  Indep. signals: ${entry.independentSignals ?? '?'}\n`;
-      txt += `  Strong ratio:   ${entry.strongRatio ?? '?'}\n`;
-      txt += `  VStrong ratio:  ${entry.veryStrongRatio ?? '?'}\n`;
-      txt += `  Metronome:      ${entry.metronome ?? '?'}\n`;
-      txt += `  CV40:           ${entry.cv40 ?? '?'}\n`;
-      txt += `  ExtremeBoost:   ${entry.extremeSpeedBoost ?? '?'}\n`;
-      txt += `  Taps (40):      ${entry.taps40count ?? '?'}\n`;
-      txt += `  Taps (300):     ${entry.taps300count ?? '?'}\n`;
-      txt += `  Інтервали (мс): ${entry.ivs40 || 'N/A'}\n`;
-    });
-  }
+  const txt = formatAcLogTxt(target, targetChatId, karma, totalDetects, strikes, logs);
 
   const boundary = '----FormBoundary' + Date.now();
   const fileName = `aclog_${targetUsername}_${Date.now()}.txt`;
@@ -2373,6 +2381,25 @@ async function handleAdminAwaitInput(TOKEN, chatId, text, awaitData) {
     await redis('HINCRBY', 'ac_total', targetChatId, '1');
     await redis('SADD', 'flagged_users', targetChatId);
     if (karma < 50) await redis('HSET', 'ac_active', targetChatId, '1');
+
+    let wStrikes = [];
+    const wsRaw = await redis('HGET', 'ac_strikes', targetChatId);
+    if (wsRaw?.result) { try { wStrikes = JSON.parse(wsRaw.result); } catch {} }
+    wStrikes.push(Date.now());
+    if (wStrikes.length > 50) wStrikes = wStrikes.slice(-50);
+    await redis('HSET', 'ac_strikes', targetChatId, JSON.stringify(wStrikes));
+
+    let wLogs = [];
+    const wlRaw = await redis('HGET', 'ac_debug_log', targetChatId);
+    if (wlRaw?.result) { try { wLogs = JSON.parse(wlRaw.result); } catch {} }
+    wLogs.push({
+      type: 'admin_warn',
+      reason: 'Ручне попередження від адміністратора',
+      karmaAfter: karma,
+      ts: Date.now(),
+    });
+    if (wLogs.length > 50) wLogs = wLogs.slice(-50);
+    await redis('HSET', 'ac_debug_log', targetChatId, JSON.stringify(wLogs));
 
     await sendTg(TOKEN, 'sendMessage', {
       chat_id: chatId,
@@ -3159,6 +3186,25 @@ module.exports = async function handler(req, res) {
           await redis('HINCRBY', 'ac_total', targetChatId, '1');
           await redis('SADD', 'flagged_users', targetChatId);
           if (karma < 50) await redis('HSET', 'ac_active', targetChatId, '1');
+
+          let wStrikes = [];
+          const wsRaw = await redis('HGET', 'ac_strikes', targetChatId);
+          if (wsRaw?.result) { try { wStrikes = JSON.parse(wsRaw.result); } catch {} }
+          wStrikes.push(Date.now());
+          if (wStrikes.length > 50) wStrikes = wStrikes.slice(-50);
+          await redis('HSET', 'ac_strikes', targetChatId, JSON.stringify(wStrikes));
+
+          let wLogs = [];
+          const wlRaw = await redis('HGET', 'ac_debug_log', targetChatId);
+          if (wlRaw?.result) { try { wLogs = JSON.parse(wlRaw.result); } catch {} }
+          wLogs.push({
+            type: 'admin_warn',
+            reason: 'Ручне попередження (перемикання мітки) від адміністратора',
+            karmaAfter: karma,
+            ts: Date.now(),
+          });
+          if (wLogs.length > 50) wLogs = wLogs.slice(-50);
+          await redis('HSET', 'ac_debug_log', targetChatId, JSON.stringify(wLogs));
         }
 
         const target = await resolveTargetUser(targetId);
@@ -4204,45 +4250,7 @@ module.exports = async function handler(req, res) {
       if (sRaw?.result) { try { strikes = JSON.parse(sRaw.result); } catch { strikes = []; } }
 
       // Формуємо TXT
-      let txt = `=== TAPSENTINEL DEBUG LOG ===\n`;
-      txt += `Гравець: ${target.name} (${target.display})\n`;
-      txt += `ID: ${targetChatId}\n`;
-      txt += `Карма: ${karma}/100\n`;
-      txt += `Всього детектів: ${totalDetects}\n`;
-      txt += `Дата звіту: ${new Date().toISOString()}\n`;
-      txt += `\n=== СТРАЙКИ (timestamps) ===\n`;
-      if (strikes.length === 0) {
-        txt += `(немає)\n`;
-      } else {
-        strikes.forEach((ts, i) => {
-          txt += `  Strike ${i + 1}: ${new Date(ts).toISOString()}\n`;
-        });
-      }
-
-      txt += `\n=== ДЕБАГ ДЕТЕКТІВ (останні ${logs.length}) ===\n`;
-      if (logs.length === 0) {
-        txt += `(немає записів — можливо, старі детекти до оновлення)\n`;
-      } else {
-        logs.forEach((entry, i) => {
-          txt += `\n--- Detect ${i + 1} ---\n`;
-          txt += `  Час: ${entry.ts ? new Date(entry.ts).toISOString() : 'N/A'}\n`;
-          txt += `  R (ритм):     ${entry.R ?? '?'}/100\n`;
-          txt += `  C (координати): ${entry.C ?? '?'}/100\n`;
-          txt += `  B (поведінка):  ${entry.B ?? '?'}/100\n`;
-          txt += `  H (людяність):  ${entry.H ?? '?'}/100\n`;
-          txt += `  Evidence:       ${entry.evidence ?? '?'}\n`;
-          txt += `  Suspicion:      ${entry.suspicion ?? '?'}\n`;
-          txt += `  Indep. signals: ${entry.independentSignals ?? '?'}\n`;
-          txt += `  Strong ratio:   ${entry.strongRatio ?? '?'}\n`;
-          txt += `  VStrong ratio:  ${entry.veryStrongRatio ?? '?'}\n`;
-          txt += `  Metronome:      ${entry.metronome ?? '?'}\n`;
-          txt += `  CV40:           ${entry.cv40 ?? '?'}\n`;
-          txt += `  ExtremeBoost:   ${entry.extremeSpeedBoost ?? '?'}\n`;
-          txt += `  Taps (40):      ${entry.taps40count ?? '?'}\n`;
-          txt += `  Taps (300):     ${entry.taps300count ?? '?'}\n`;
-          txt += `  Інтервали (мс): ${entry.ivs40 || 'N/A'}\n`;
-        });
-      }
+      const txt = formatAcLogTxt(target, targetChatId, karma, totalDetects, strikes, logs);
 
       // Відправляємо як документ
       const boundary = '----FormBoundary' + Date.now();
@@ -4290,6 +4298,25 @@ module.exports = async function handler(req, res) {
       await redis('HSET', 'ac_karma', targetChatId, JSON.stringify({ k: karma, on: 0, ts: Date.now() }));
       await redis('HINCRBY', 'ac_total', targetChatId, '1');
       if (karma < 50) await redis('HSET', 'ac_active', targetChatId, '1');
+
+      let wStrikes = [];
+      const wsRaw = await redis('HGET', 'ac_strikes', targetChatId);
+      if (wsRaw?.result) { try { wStrikes = JSON.parse(wsRaw.result); } catch {} }
+      wStrikes.push(Date.now());
+      if (wStrikes.length > 50) wStrikes = wStrikes.slice(-50);
+      await redis('HSET', 'ac_strikes', targetChatId, JSON.stringify(wStrikes));
+
+      let wLogs = [];
+      const wlRaw = await redis('HGET', 'ac_debug_log', targetChatId);
+      if (wlRaw?.result) { try { wLogs = JSON.parse(wlRaw.result); } catch {} }
+      wLogs.push({
+        type: 'admin_warn',
+        reason: 'Команда /warn від адміністратора',
+        karmaAfter: karma,
+        ts: Date.now(),
+      });
+      if (wLogs.length > 50) wLogs = wLogs.slice(-50);
+      await redis('HSET', 'ac_debug_log', targetChatId, JSON.stringify(wLogs));
       await sendTg(TOKEN, 'sendMessage', {
         chat_id: chatId,
         text: `⚠️ Знак видано для ${target.display}. Карма: *${karma}/100*.\nЗняти всі обмеження: \`/unflag ${target.shortDisplay}\``,

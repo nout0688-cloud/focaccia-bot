@@ -107,19 +107,20 @@ module.exports = async function handler(req, res) {
         }
         const prevStrike = strikes.length ? strikes[strikes.length - 1] : 0;
         strikes.push(now);
-        if (strikes.length > 20) strikes = strikes.slice(-20);
+        if (strikes.length > 50) strikes = strikes.slice(-50);
         await redis('HSET', 'ac_strikes', userId, JSON.stringify(strikes));
         await redis('HINCRBY', 'ac_total', userId, '1');
 
-        // Зберігаємо дебаг-лог детекту (останні 20 записів)
-        if (body.debug && typeof body.debug === 'object') {
-          let logs = [];
-          const logsRaw = await redis('HGET', 'ac_debug_log', userId);
-          if (logsRaw?.result) { try { logs = JSON.parse(logsRaw.result); } catch { logs = []; } }
-          logs.push(body.debug);
-          if (logs.length > 20) logs = logs.slice(-20);
-          await redis('HSET', 'ac_debug_log', userId, JSON.stringify(logs));
-        }
+        // Зберігаємо дебаг-лог детекту (останні 50 записів)
+        let logs = [];
+        const logsRaw = await redis('HGET', 'ac_debug_log', userId);
+        if (logsRaw?.result) { try { logs = JSON.parse(logsRaw.result); } catch { logs = []; } }
+        const logEntry = (body.debug && typeof body.debug === 'object')
+          ? { ...body.debug, type: 'tapsentinel_client', ts: body.debug.ts || now }
+          : { type: 'tapsentinel_client', reason: 'TapSentinel спрацював (клієнтський сигнал)', ts: now };
+        logs.push(logEntry);
+        if (logs.length > 50) logs = logs.slice(-50);
+        await redis('HSET', 'ac_debug_log', userId, JSON.stringify(logs));
 
         const recent24 = strikes.filter((ts) => now - ts < 24 * 3600000).length;
         const { k } = await getKarma(userId);
@@ -132,14 +133,52 @@ module.exports = async function handler(req, res) {
         return res.status(200).json({ ok: true, karma });
       }
       if (body.event === 'fail') {
+        const now = Date.now();
         const { k } = await getKarma(userId);
-        const karma = Math.max(0, k - 5); // не прошів challenge
+        const karma = Math.max(0, k - 5); // не пройшов challenge
         await setKarma(userId, karma, 0);
+
+        let strikes = [];
+        const sRaw = await redis('HGET', 'ac_strikes', userId);
+        if (sRaw?.result) { try { strikes = JSON.parse(sRaw.result); } catch { strikes = []; } }
+        strikes.push(now);
+        if (strikes.length > 50) strikes = strikes.slice(-50);
+        await redis('HSET', 'ac_strikes', userId, JSON.stringify(strikes));
+        await redis('HINCRBY', 'ac_total', userId, '1');
+
+        let logs = [];
+        const logsRaw = await redis('HGET', 'ac_debug_log', userId);
+        if (logsRaw?.result) { try { logs = JSON.parse(logsRaw.result); } catch { logs = []; } }
+        logs.push({
+          type: 'challenge_fail',
+          reason: 'Провал капчі бабусі (ігнорування або таймаут)',
+          karmaAfter: karma,
+          ts: now,
+        });
+        if (logs.length > 50) logs = logs.slice(-50);
+        await redis('HSET', 'ac_debug_log', userId, JSON.stringify(logs));
+
+        if (karma < 50) await redis('HSET', 'ac_active', userId, '1');
+
         return res.status(200).json({ ok: true, karma });
       }
       if (body.event === 'clear') {
+        const now = Date.now();
         const { k } = await getKarma(userId);
         await redis('HDEL', 'ac_active', userId); // підозру знято, карма не міняється
+
+        let logs = [];
+        const logsRaw = await redis('HGET', 'ac_debug_log', userId);
+        if (logsRaw?.result) { try { logs = JSON.parse(logsRaw.result); } catch { logs = []; } }
+        logs.push({
+          type: 'challenge_pass',
+          reason: 'Капчу бабусі успішно пройдено гравцем',
+          karmaAfter: k,
+          ts: now,
+        });
+        if (logs.length > 50) logs = logs.slice(-50);
+        await redis('HSET', 'ac_debug_log', userId, JSON.stringify(logs));
+
         return res.status(200).json({ ok: true, karma: k });
       }
 
@@ -167,14 +206,42 @@ module.exports = async function handler(req, res) {
       while (onlineMs >= HOUR_MS && karma < 100) { karma = Math.min(100, karma + 1); onlineMs -= HOUR_MS; }
 
       // Античит: порівнюємо дельту кліків з попереднього репорту.
-      // Рука людини не дає стабільно > 400 кл/мин (6.7/с) цілодобово.
+      // Рука людини не дає стабільно > 500 кл/хв (8.3/с) протягом тривалого часу.
+      // Захист від хибних спрацьовувань: враховуємо тільки відрізки >= 10с або якщо дельта кліків >= 120.
       if (prev && typeof prev.k === 'number' && prev.ts) {
         const dClicks = clicks - prev.k;
-        const dMin = (now - prev.ts) / 60000;
-        if (dClicks > 0 && dMin > 0 && dClicks / dMin > 400) {
-          karma = Math.max(0, karma - 15);
-          await redis('HINCRBY', 'ac_total', userId, '1');
-          await redis('HSET', 'ac_active', userId, '1');
+        const dSec = (now - prev.ts) / 1000;
+        const dMin = dSec / 60;
+        if (dClicks > 0 && dSec >= 10 && dMin > 0) {
+          const ratePerMin = dClicks / dMin;
+          if (ratePerMin > 500) {
+            karma = Math.max(0, karma - 15);
+            await redis('HINCRBY', 'ac_total', userId, '1');
+            await redis('HSET', 'ac_active', userId, '1');
+
+            // Записуємо страйк
+            let strikes = [];
+            const sRaw = await redis('HGET', 'ac_strikes', userId);
+            if (sRaw?.result) { try { strikes = JSON.parse(sRaw.result); } catch { strikes = []; } }
+            strikes.push(now);
+            if (strikes.length > 50) strikes = strikes.slice(-50);
+            await redis('HSET', 'ac_strikes', userId, JSON.stringify(strikes));
+
+            // Записуємо дебаг-лог
+            let logs = [];
+            const logsRaw = await redis('HGET', 'ac_debug_log', userId);
+            if (logsRaw?.result) { try { logs = JSON.parse(logsRaw.result); } catch { logs = []; } }
+            logs.push({
+              type: 'server_cps_spike',
+              reason: `Аномальна швидкість кліків (${Math.round(ratePerMin)} кл/хв)`,
+              dClicks,
+              dSec: Math.round(dSec),
+              ratePerSec: (dClicks / dSec).toFixed(1),
+              ts: now,
+            });
+            if (logs.length > 50) logs = logs.slice(-50);
+            await redis('HSET', 'ac_debug_log', userId, JSON.stringify(logs));
+          }
         }
       }
       await setKarma(userId, karma, onlineMs);
