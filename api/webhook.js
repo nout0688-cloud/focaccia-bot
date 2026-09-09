@@ -3,7 +3,7 @@
  * Webhook + Admin panel для user ID 1975429762
  */
 
-const WEBAPP_URL = 'https://nout0688-cloud.github.io/focaccia-clicker/?v=1.3.0';
+const WEBAPP_URL = 'https://nout0688-cloud.github.io/focaccia-clicker/?v=1.3.1';
 const ADMIN_ID = process.env.ADMIN_ID ? parseInt(process.env.ADMIN_ID, 10) : 1975429762;
 
 async function redis(...args) {
@@ -2511,6 +2511,90 @@ module.exports = async function handler(req, res) {
 
   try {
     const update = req.body;
+
+    // ===== 🌟 TELEGRAM STARS PAYMENTS =====
+    if (update.pre_checkout_query) {
+      const pcq = update.pre_checkout_query;
+      try {
+        await fetch(`https://api.telegram.org/bot${TOKEN}/answerPreCheckoutQuery`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            pre_checkout_query_id: pcq.id,
+            ok: true,
+          }),
+        });
+      } catch (err) {
+        console.error('answerPreCheckoutQuery error:', err);
+      }
+      return res.status(200).json({ ok: true });
+    }
+
+    if (update.message?.successful_payment) {
+      const msg = update.message;
+      const sp = msg.successful_payment;
+      const payload = String(sp.invoice_payload || '');
+      const parts = payload.split(':');
+      const targetUserId = parts[0] || String(msg.from.id);
+      const packageId = parts[1] || '';
+      const chatId = msg.chat?.id || targetUserId;
+
+      let diamonds = 0;
+      let title = 'Діаманти';
+      let extraNote = '';
+
+      if (packageId === 'gems_50') {
+        diamonds = 50;
+        title = '50 Діамантів 💎';
+      } else if (packageId === 'gems_150') {
+        diamonds = 150;
+        title = '150 Діамантів 💎';
+      } else if (packageId === 'gems_500') {
+        diamonds = 500;
+        title = '500 Діамантів 💎';
+      } else if (packageId === 'gems_1500') {
+        diamonds = 1500;
+        title = '1500 Діамантів 💎';
+      } else if (packageId === 'starter_pack') {
+        diamonds = 100;
+        title = '⚡ Стартовий набір';
+        extraNote = '\n🪵 Вам також надано зброю проти босів «Бойова скалка»!';
+        await redis('HSET', `user_extra:${targetUserId}`, 'vip_upgrade', 'vip_hammer');
+      } else if (packageId === 'tip_dev') {
+        diamonds = 25;
+        title = '☕ Чайові розробнику';
+        extraNote = '\n💖 Вам присвоєно особливий титул «Меценат»!';
+        await redis('HSET', `user_extra:${targetUserId}`, 'badge_patron', '1');
+      } else {
+        diamonds = Math.max(10, (sp.total_amount || 10) * 3);
+      }
+
+      if (diamonds > 0) {
+        const existing = await redis('GET', `reward_gem:${targetUserId}`);
+        const prevGems = existing?.result ? parseInt(existing.result, 10) : 0;
+        await redis('SET', `reward_gem:${targetUserId}`, String(prevGems + diamonds));
+        await redis('SET', `reward_gem_source:${targetUserId}`, 'donate');
+      }
+
+      await redis('HINCRBY', 'donations_total_stars', targetUserId, String(sp.total_amount || 0));
+      await redis('HINCRBY', 'donations_count', targetUserId, '1');
+      await redis('INCRBY', 'global_donations_stars', String(sp.total_amount || 0));
+
+      try {
+        await sendTg(TOKEN, 'sendMessage', {
+          chat_id: Number(chatId),
+          text: `🎉 *Оплата успішна!*\n\nЩиро дякуємо за придбання *${title}* за ${sp.total_amount} ⭐!\n\n💎 Вам нараховано: *+${diamonds} 💎*${extraNote}\n\nВідкрийте гру, щоб отримати нагороду!`,
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [[{ text: '🫓 Відкрити гру', web_app: { url: WEBAPP_URL } }]],
+          },
+        });
+      } catch (err) {
+        console.error('Error sending purchase confirmation:', err);
+      }
+
+      return res.status(200).json({ ok: true });
+    }
 
     // ===== ⚔️ ДУЭЛИ: inline-кнопки =====
     const cq = update.callback_query;

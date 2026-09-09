@@ -79,7 +79,13 @@ module.exports = async function handler(req, res) {
     const deductData = await redis('GET', `deduct:${userId}`);
     const deduct = deductData?.result ? parseInt(deductData.result) : 0;
 
-    if (amount > 0 || rebirths > 0 || diamonds > 0 || deduct > 0) {
+    const extraUpgradeData = await redis('HGET', `user_extra:${userId}`, 'vip_upgrade');
+    const extraUpgrade = extraUpgradeData?.result || null;
+
+    const patronData = await redis('HGET', `user_extra:${userId}`, 'badge_patron');
+    const patronBadge = patronData?.result === '1';
+
+    if (amount > 0 || rebirths > 0 || diamonds > 0 || deduct > 0 || extraUpgrade || patronBadge) {
       // Clear pending grants after claiming
       if (amount > 0) await redis('DEL', `reward:${userId}`);
       if (rebirths > 0) await redis('DEL', `rebirth:${userId}`);
@@ -88,7 +94,20 @@ module.exports = async function handler(req, res) {
         await redis('DEL', `reward_gem_source:${userId}`);
       }
       if (deduct > 0) await redis('DEL', `deduct:${userId}`);
-      return res.status(200).json({ ok: true, reward: amount, rebirth: rebirths, diamonds, gemSource, deduct, karma });
+      if (extraUpgrade) await redis('HDEL', `user_extra:${userId}`, 'vip_upgrade');
+      if (patronBadge) await redis('HDEL', `user_extra:${userId}`, 'badge_patron');
+
+      return res.status(200).json({
+        ok: true,
+        reward: amount,
+        rebirth: rebirths,
+        diamonds,
+        gemSource,
+        deduct,
+        extraUpgrade,
+        patronBadge,
+        karma,
+      });
     }
 
     return res.status(200).json({ ok: true, reward: 0, karma });
