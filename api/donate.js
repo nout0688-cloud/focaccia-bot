@@ -8,37 +8,37 @@ const PACKAGES = {
   gems_50: {
     title: '50 Діамантів 💎',
     description: 'Жменя сяючих діамантів для прокачок у Фокача Клікер',
-    stars: 15,
+    stars: 10,
     diamonds: 50,
   },
   gems_150: {
     title: '150 Діамантів 💎',
     description: 'Мішечок сяючих діамантів (+15 бонус)',
-    stars: 39,
+    stars: 25,
     diamonds: 150,
   },
   gems_500: {
     title: '500 Діамантів 💎',
     description: 'Скриня сяючих діамантів (+75 бонус)',
-    stars: 119,
+    stars: 75,
     diamonds: 500,
   },
   gems_1500: {
     title: '1500 Діамантів 💎',
     description: 'Скарбниця Фокачі (+300 бонус)',
-    stars: 299,
+    stars: 199,
     diamonds: 1500,
   },
   starter_pack: {
     title: '⚡ Стартовий набір',
     description: '100 💎 + зброя «Бойова скалка» 🪵 для боротьби з босами',
-    stars: 25,
+    stars: 15,
     diamonds: 100,
   },
   tip_dev: {
     title: '☕ Чайові розробнику',
     description: '25 💎 + особлива позначка 💖 Меценат у профілі',
-    stars: 15,
+    stars: 10,
     diamonds: 25,
   },
 };
