@@ -94,6 +94,10 @@ module.exports = async function handler(req, res) {
       diamonds: order.diamonds || 0,
       isStarter: !!order.isStarter,
       isTip: !!order.isTip,
+      items: order.items || [],
+      title: order.title || '',
+      amountUah: order.amountUah || 0,
+      createdAt: order.createdAt || 0,
     });
   }
 
@@ -120,18 +124,73 @@ module.exports = async function handler(req, res) {
     return res.status(400).json({ error: 'userId is required' });
   }
 
-  // ===== 🏦 MONOBANK JAR ORDER =====
+  // ===== 🏦 MONOBANK JAR ORDER (Одиночний товар або Кошик) =====
   if (reqType === 'jar_order') {
     const customAmount = parseInt(body.customAmount || req.query.customAmount || '0', 10);
     const username = String(body.username || req.query.username || '').replace(/^@/, '').trim();
+    const cartItemsRaw = Array.isArray(body.cartItems) ? body.cartItems : [];
 
     let orderPackageTitle = '';
     let amountUah = 0;
     let diamonds = 0;
     let isStarter = false;
     let isTip = false;
+    let orderItems = [];
 
-    if (packageId === 'custom_tip') {
+    // 1. Якщо це замовлення з кошика (кілька товарів)
+    if (cartItemsRaw.length > 0) {
+      for (const item of cartItemsRaw) {
+        const pkg = PACKAGES[item.packageId];
+        const count = Math.max(1, Math.min(99, parseInt(item.count || '1', 10)));
+        if (pkg) {
+          const itemUah = pkg.priceUah * count;
+          const itemDiamonds = pkg.diamonds * count;
+          amountUah += itemUah;
+          diamonds += itemDiamonds;
+          if (pkg.isStarter) isStarter = true;
+          if (pkg.isTip) isTip = true;
+          orderItems.push({
+            packageId: item.packageId,
+            title: pkg.title,
+            count,
+            priceUah: itemUah,
+            diamonds: itemDiamonds,
+            isStarter: !!pkg.isStarter,
+            isTip: !!pkg.isTip,
+          });
+        }
+      }
+
+      // Додаткові чайові з кошика, якщо вказано
+      if (!isNaN(customAmount) && customAmount >= 1 && customAmount <= 9999) {
+        const tipDiamonds = Math.max(1, Math.round(customAmount * 2.5));
+        amountUah += customAmount;
+        diamonds += tipDiamonds;
+        isTip = true;
+        orderItems.push({
+          packageId: 'custom_tip',
+          title: `💖 Чайові автору (${customAmount} ₴)`,
+          count: 1,
+          priceUah: customAmount,
+          diamonds: tipDiamonds,
+          isTip: true,
+        });
+      }
+
+      if (orderItems.length === 0) {
+        return res.status(400).json({ error: 'Кошик порожній або містить недійсні товари' });
+      }
+
+      if (orderItems.length === 1) {
+        orderPackageTitle = orderItems[0].count > 1
+          ? `${orderItems[0].count}x ${orderItems[0].title}`
+          : orderItems[0].title;
+      } else {
+        const summary = orderItems.map((it) => `${it.count}x ${it.title}`).slice(0, 2).join(', ');
+        orderPackageTitle = `🛒 Кошик: ${summary}${orderItems.length > 2 ? ` (+ще ${orderItems.length - 2})` : ''}`;
+      }
+    } else if (packageId === 'custom_tip') {
+      // 2. Одиночні чайові
       if (isNaN(customAmount) || customAmount < 1 || customAmount > 9999) {
         return res.status(400).json({ error: 'Сума чайових має бути від 1 до 9999 ₴' });
       }
@@ -139,7 +198,16 @@ module.exports = async function handler(req, res) {
       diamonds = Math.max(1, Math.round(customAmount * 2.5));
       orderPackageTitle = `💖 Чайові автору (${amountUah} ₴)`;
       isTip = true;
+      orderItems.push({
+        packageId: 'custom_tip',
+        title: orderPackageTitle,
+        count: 1,
+        priceUah: amountUah,
+        diamonds,
+        isTip: true,
+      });
     } else {
+      // 3. Одиночний пакет товарів
       const pkg = PACKAGES[packageId];
       if (!pkg) {
         return res.status(400).json({ error: 'Недійсний ідентифікатор товару' });
@@ -149,6 +217,15 @@ module.exports = async function handler(req, res) {
       diamonds = pkg.diamonds;
       isStarter = !!pkg.isStarter;
       isTip = !!pkg.isTip;
+      orderItems.push({
+        packageId,
+        title: pkg.title,
+        count: 1,
+        priceUah: pkg.priceUah,
+        diamonds: pkg.diamonds,
+        isStarter: !!pkg.isStarter,
+        isTip: !!pkg.isTip,
+      });
     }
 
     // Генерація 4-значного коду (напр. FC-4821)
@@ -159,18 +236,25 @@ module.exports = async function handler(req, res) {
       id: orderId,
       userId,
       username,
-      packageId,
+      packageId: cartItemsRaw.length > 0 ? 'cart_bundle' : packageId,
       title: orderPackageTitle,
       amountUah,
       diamonds,
       isStarter,
       isTip,
+      items: orderItems,
       status: 'pending',
       createdAt: Date.now(),
     };
 
     // Зберігаємо замовлення в Redis на 48 годин
     await redis('SET', `order:${orderId}`, JSON.stringify(orderData), 'EX', 172800);
+
+    // Список товарів для адміна
+    let itemsText = '';
+    if (orderItems.length > 1) {
+      itemsText = `\n📋 <b>Склад кошика:</b>\n` + orderItems.map((it) => `  • ${it.count}x <b>${it.title}</b> — ${it.priceUah} ₴ (+${it.diamonds} 💎)`).join('\n') + '\n';
+    }
 
     // Сповіщення розробнику (ADMIN_ID) у Telegram з інлайн-кнопками підтвердження
     const userTag = username ? `@${username}` : `(без @username)`;
@@ -179,7 +263,7 @@ module.exports = async function handler(req, res) {
 
 🧾 Замовлення: <code>#${orderId}</code>
 👤 Гравець: ${userTag} (ID: <code>${userId}</code>)
-📦 Товар: <b>${orderPackageTitle}</b>
+📦 Товар: <b>${orderPackageTitle}</b>${itemsText}
 💎 Нагорода: <b>+${diamonds} 💎</b>${isStarter ? ' + Бойова скалка 🪵' : ''}${isTip ? ' + титул Меценат 💖' : ''}
 💵 До сплати: <b>${amountUah} ₴</b>
 💬 <b>Коментар у банці має бути:</b> <code>${orderId}</code>
@@ -218,6 +302,8 @@ module.exports = async function handler(req, res) {
       comment: orderId,
       jarUrl: JAR_URL,
       title: orderPackageTitle,
+      items: orderItems,
+      createdAt: orderData.createdAt,
     });
   }
 
