@@ -206,15 +206,15 @@ module.exports = async function handler(req, res) {
       while (onlineMs >= HOUR_MS && karma < 100) { karma = Math.min(100, karma + 1); onlineMs -= HOUR_MS; }
 
       // Античит: порівнюємо дельту кліків з попереднього репорту.
-      // Рука людини не дає стабільно > 500 кл/хв (8.3/с) протягом тривалого часу.
-      // Захист від хибних спрацьовувань: враховуємо тільки відрізки >= 10с або якщо дельта кліків >= 120.
+      // Рука людини навіть двома пальцями не дає стабільно > 850 кл/хв (14.2/с) протягом 10+ секунд.
+      // Захист від хибних спрацьовувань: враховуємо тільки стабільні відрізки >= 10с.
       if (prev && typeof prev.k === 'number' && prev.ts) {
         const dClicks = clicks - prev.k;
         const dSec = (now - prev.ts) / 1000;
         const dMin = dSec / 60;
         if (dClicks > 0 && dSec >= 10 && dMin > 0) {
           const ratePerMin = dClicks / dMin;
-          if (ratePerMin > 500) {
+          if (ratePerMin > 850) {
             karma = Math.max(0, karma - 15);
             await redis('HINCRBY', 'ac_total', userId, '1');
             await redis('HSET', 'ac_active', userId, '1');
