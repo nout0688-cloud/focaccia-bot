@@ -221,44 +221,5 @@ module.exports = async function handler(req, res) {
     });
   }
 
-  // ===== ⭐ TELEGRAM STARS INVOICE =====
-  const pkg = PACKAGES[packageId];
-  if (!pkg) {
-    return res.status(400).json({ error: 'Invalid packageId' });
-  }
-
-  try {
-    const payload = `${userId}:${packageId}:${Date.now()}`;
-    const tgRes = await fetch(`https://api.telegram.org/bot${TOKEN}/createInvoiceLink`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        title: pkg.title,
-        description: pkg.description,
-        payload,
-        currency: 'XTR',
-        prices: [{ label: pkg.title, amount: pkg.stars }],
-      }),
-    });
-
-    const data = await tgRes.json();
-    if (!data.ok) {
-      console.error('Telegram createInvoiceLink error:', data);
-      return res.status(500).json({ error: data.description || 'Failed to create invoice link' });
-    }
-
-    return res.status(200).json({
-      ok: true,
-      invoiceLink: data.result,
-      package: {
-        id: packageId,
-        title: pkg.title,
-        stars: pkg.stars,
-        diamonds: pkg.diamonds,
-      },
-    });
-  } catch (err) {
-    console.error('Invoice creation exception:', err);
-    return res.status(500).json({ error: 'Internal server error' });
-  }
+  return res.status(400).json({ error: 'Невідомий тип запиту' });
 };
