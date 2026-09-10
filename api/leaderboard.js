@@ -199,44 +199,73 @@ module.exports = async function handler(req, res) {
         try { prev = JSON.parse(prevRaw.result); } catch { /* skip corrupted */ }
       }
 
-      // Карма: +1 за годину онлайн-гри (рахуємо час між репортами, максимум 2 хв за раз)
+      // 1. Опрацювання накопичених офлайн-подій античиту з клієнта
       const cur = await getKarma(userId);
       let karma = cur.k;
+      if (Array.isArray(body.offlineEvents) && body.offlineEvents.length > 0) {
+        for (const ev of body.offlineEvents) {
+          if (ev.event === 'flag' || ev.event === 'fail') {
+            const penalty = ev.event === 'fail' ? 25 : 15;
+            karma = Math.max(0, karma - penalty);
+            await redis('HINCRBY', 'ac_total', userId, '1');
+            await redis('HSET', 'ac_active', userId, '1');
+            let strikes = [];
+            const sRaw = await redis('HGET', 'ac_strikes', userId);
+            if (sRaw?.result) { try { strikes = JSON.parse(sRaw.result); } catch {} }
+            strikes.push(ev.ts || now);
+            if (strikes.length > 50) strikes = strikes.slice(-50);
+            await redis('HSET', 'ac_strikes', userId, JSON.stringify(strikes));
+          }
+        }
+      }
+      // Якщо клієнт локально знизив карму через автоклікер — сервер не повинен її перезаписувати вищою!
+      if (typeof body.clientKarma === 'number' && body.clientKarma < karma) {
+        karma = Math.max(0, body.clientKarma);
+      }
+
+      // Карма: +1 за годину чесної онлайн-гри (максимум 2 хв за один репорт)
       let onlineMs = cur.on + Math.min(now - (prev?.ts || now), 120000);
       while (onlineMs >= HOUR_MS && karma < 100) { karma = Math.min(100, karma + 1); onlineMs -= HOUR_MS; }
 
-      // Античит: порівнюємо дельту кліків з попереднього репорту.
-      // Рука людини навіть двома пальцями не дає стабільно > 850 кл/хв (14.2/с) протягом 10+ секунд.
-      // Захист від хибних спрацьовувань: враховуємо тільки стабільні відрізки >= 10с.
+      // 2. Потужна серверна валідація швидкості кліків та офлайн-макросів
+      let cheated = false;
       if (prev && typeof prev.k === 'number' && prev.ts) {
         const dClicks = clicks - prev.k;
-        const dSec = (now - prev.ts) / 1000;
+        const dSec = Math.max(1, (now - prev.ts) / 1000);
         const dMin = dSec / 60;
-        if (dClicks > 0 && dSec >= 10 && dMin > 0) {
+
+        if (dClicks > 0) {
           const ratePerMin = dClicks / dMin;
-          if (ratePerMin > 850) {
-            karma = Math.max(0, karma - 15);
+          const ratePerSec = dClicks / dSec;
+          // Фізична межа людини:
+          // 1) Стабільно більше 650 кл/хв (10.8 CPS) протягом 10+ секунд
+          // 2) Загальна кількість кліків перевищує фізичний максимум (14 CPS) за час відсутності
+          const maxAllowedClicks = Math.max(100, Math.floor(dSec * 14));
+          const isCheatedRate = (dSec >= 10 && ratePerMin > 650) || (dClicks > maxAllowedClicks);
+
+          if (isCheatedRate) {
+            cheated = true;
+            // Жорсткий страйк: пряме скидання карми в зону покарання («Тінь бабусі» <= 20)
+            karma = Math.max(0, Math.min(karma - 35, 20));
             await redis('HINCRBY', 'ac_total', userId, '1');
             await redis('HSET', 'ac_active', userId, '1');
 
-            // Записуємо страйк
             let strikes = [];
             const sRaw = await redis('HGET', 'ac_strikes', userId);
-            if (sRaw?.result) { try { strikes = JSON.parse(sRaw.result); } catch { strikes = []; } }
+            if (sRaw?.result) { try { strikes = JSON.parse(sRaw.result); } catch {} }
             strikes.push(now);
             if (strikes.length > 50) strikes = strikes.slice(-50);
             await redis('HSET', 'ac_strikes', userId, JSON.stringify(strikes));
 
-            // Записуємо дебаг-лог
             let logs = [];
             const logsRaw = await redis('HGET', 'ac_debug_log', userId);
-            if (logsRaw?.result) { try { logs = JSON.parse(logsRaw.result); } catch { logs = []; } }
+            if (logsRaw?.result) { try { logs = JSON.parse(logsRaw.result); } catch {} }
             logs.push({
-              type: 'server_cps_spike',
-              reason: `Аномальна швидкість кліків (${Math.round(ratePerMin)} кл/хв)`,
+              type: 'server_auto_click_detected',
+              reason: `Автоклікер виявлено (${Math.round(ratePerMin)} кл/хв, дельта: ${dClicks} за ${Math.round(dSec)}с)`,
               dClicks,
               dSec: Math.round(dSec),
-              ratePerSec: (dClicks / dSec).toFixed(1),
+              ratePerSec: ratePerSec.toFixed(1),
               ts: now,
             });
             if (logs.length > 50) logs = logs.slice(-50);
@@ -246,9 +275,11 @@ module.exports = async function handler(req, res) {
       }
       await setKarma(userId, karma, onlineMs);
 
-      // Карма < 25 — «Тінь бабусі»: прогрес у лідерборді заморожено
-      const frozen = karma < 25 && prev && typeof prev.t === 'number';
+      // 3. Заморозка та анулювання накручених даних при Karma < 25 («Тінь бабусі») або чітерстві
+      const frozen = (karma < 25 || cheated) && prev && typeof prev.t === 'number';
       const storedTotal = frozen ? prev.t : total;
+      // Накручені кліки НЕ зараховуються до лідерборду!
+      const storedClicks = frozen ? (prev?.k || 0) : clicks;
       const bosses = Math.max(0, Math.min(parseInt(body.bosses, 10) || 0, 1e6));
       const achievements = Math.max(0, Math.min(parseInt(body.achievements, 10) || 0, 100));
       const showcase = Array.isArray(body.showcase) ? body.showcase.slice(0, 3) : (prev?.sc || ['clicks', 'total', 'diamonds']);
@@ -262,7 +293,7 @@ module.exports = async function handler(req, res) {
         t: storedTotal,
         p: prestige,
         d: diamonds,
-        k: clicks,
+        k: storedClicks,
         b: bosses,
         ac: achievements,
         sc: showcase,
