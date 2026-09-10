@@ -195,6 +195,57 @@ async function resolveUserId(input) {
     return res.status(200).json({ ok: true, targetId, skinsResetTime: resetTime });
   }
 
+  // ===== 👑 ADMIN ACTION: GIVE CURRENCY TO SPECIFIC USER =====
+  if (action === 'give_user') {
+    const reqAdminId = parseInt(body.adminId || req.query.adminId || '0', 10);
+    if (reqAdminId !== ADMIN_ID) {
+      return res.status(403).json({ ok: false, error: 'Unauthorized: admin only' });
+    }
+    const targetInput = body.target || body.targetUserId || req.query.target;
+    const targetId = await resolveUserId(targetInput);
+    if (!targetId) {
+      return res.status(404).json({ ok: false, error: 'User not found' });
+    }
+    const cur = (body.cur || req.query.cur || 'foc').toLowerCase();
+    const amount = parseInt(body.amount || req.query.amount || '0', 10);
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ ok: false, error: 'invalid amount' });
+    }
+
+    if (cur === 'gem' || cur === 'diamonds') {
+      const ex = await redis('GET', `reward_gem:${targetId}`);
+      const c = ex?.result ? parseInt(ex.result, 10) : 0;
+      await redis('SET', `reward_gem:${targetId}`, String(c + amount));
+      await redis('SET', `reward_gem_source:${targetId}`, 'admin');
+    } else {
+      const ex = await redis('GET', `reward:${targetId}`);
+      const c = ex?.result ? parseInt(ex.result, 10) : 0;
+      await redis('SET', `reward:${targetId}`, String(c + amount));
+      await redis('DEL', `deduct:${targetId}`);
+    }
+
+    const botToken = process.env.BOT_TOKEN;
+    if (botToken) {
+      const textMsg = (cur === 'gem' || cur === 'diamonds')
+        ? `💎 *Адміністратор нарахував тобі +${amount} 💎 алмазів!*\nЗайди в гру щоб отримати.`
+        : `🎁 *Адміністратор нарахував тобі +${amount.toLocaleString()} 🫓 фокач!*\nЗайди в гру щоб отримати.`;
+      fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: Number(targetId),
+          text: textMsg,
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [[{ text: '🫓 Забрати нагороду!', web_app: { url: WEBAPP_URL } }]],
+          },
+        }),
+      }).catch(() => {});
+    }
+
+    return res.status(200).json({ ok: true, targetId, amount, cur });
+  }
+
   // ===== Check maintenance mode from Redis =====
   let isMaintenance = false;
   try {
