@@ -136,6 +136,38 @@ module.exports = async function handler(req, res) {
     }
   }
 
+async function resolveUserId(input) {
+  if (!input) return null;
+  const raw = String(input).replace(/^@/, '').trim();
+  if (!raw) return null;
+  if (/^\d{4,25}$/.test(raw)) return raw;
+  const tData = await redis('HGET', 'usernames', raw.toLowerCase());
+  if (tData?.result) return String(tData.result);
+  const lbData = await redis('HGETALL', 'leaderboard');
+  if (lbData?.result) {
+    for (let i = 0; i < lbData.result.length; i += 2) {
+      try {
+        const lb = JSON.parse(lbData.result[i + 1]);
+        if (lb.u && lb.u.toLowerCase() === raw.toLowerCase()) {
+          return String(lbData.result[i]);
+        }
+      } catch {}
+    }
+  }
+  const uData = await redis('HGETALL', 'users');
+  if (uData?.result) {
+    for (let i = 0; i < uData.result.length; i += 2) {
+      try {
+        const u = JSON.parse(uData.result[i + 1]);
+        if (u.username && u.username.toLowerCase() === raw.toLowerCase()) {
+          return String(uData.result[i]);
+        }
+      } catch {}
+    }
+  }
+  return null;
+}
+
   // ===== 👑 ADMIN ACTION: WIPE ALL SKINS TO CLASSIC =====
   if (action === 'reset_skins_all') {
     const reqAdminId = parseInt(body.adminId || req.query.adminId || '0', 10);
@@ -145,6 +177,22 @@ module.exports = async function handler(req, res) {
     const resetTime = Date.now();
     await redis('SET', 'global_skins_reset_time', String(resetTime));
     return res.status(200).json({ ok: true, skinsResetTime: resetTime });
+  }
+
+  // ===== 👑 ADMIN ACTION: WIPE SKINS FOR SPECIFIC USER =====
+  if (action === 'reset_skins_user') {
+    const reqAdminId = parseInt(body.adminId || req.query.adminId || '0', 10);
+    if (reqAdminId !== ADMIN_ID) {
+      return res.status(403).json({ ok: false, error: 'Unauthorized: admin only' });
+    }
+    const targetInput = body.target || body.targetUserId || req.query.target;
+    const targetId = await resolveUserId(targetInput);
+    if (!targetId) {
+      return res.status(404).json({ ok: false, error: 'User not found' });
+    }
+    const resetTime = Date.now();
+    await redis('SET', `reset_skins:${targetId}`, String(resetTime));
+    return res.status(200).json({ ok: true, targetId, skinsResetTime: resetTime });
   }
 
   // ===== Check maintenance mode from Redis =====
@@ -194,14 +242,21 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // Check global skins wipe
+    // Check skins wipe (individual user flag or global wipe)
     let resetSkins = false;
     let skinsResetTime = 0;
-    const globalSkinsResetData = await redis('GET', 'global_skins_reset_time');
-    if (globalSkinsResetData?.result) {
-      skinsResetTime = parseInt(globalSkinsResetData.result, 10);
-      if (skinsResetTime > 0 && userLastSkinsReset < skinsResetTime) {
-        resetSkins = true;
+    const indSkinsReset = await redis('GET', `reset_skins:${userId}`);
+    if (indSkinsReset?.result) {
+      resetSkins = true;
+      skinsResetTime = parseInt(indSkinsReset.result, 10) || Date.now();
+      await redis('DEL', `reset_skins:${userId}`);
+    } else {
+      const globalSkinsResetData = await redis('GET', 'global_skins_reset_time');
+      if (globalSkinsResetData?.result) {
+        skinsResetTime = parseInt(globalSkinsResetData.result, 10);
+        if (skinsResetTime > 0 && userLastSkinsReset < skinsResetTime) {
+          resetSkins = true;
+        }
       }
     }
 

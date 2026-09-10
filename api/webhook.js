@@ -1110,6 +1110,7 @@ async function getAdminPanelMessage() {
         { text: '⚠️ Скинути акаунт', callback_data: 'admin:menu:reset' },
       ],
       [
+        { text: '🧹 Забрати скіни', callback_data: 'admin:menu:takeskins' },
         { text: '❌ Закрити панель', callback_data: 'admin:close' },
       ],
     ],
@@ -1834,6 +1835,22 @@ function renderResetAllConfirm() {
   return { text, parse_mode: 'Markdown', reply_markup };
 }
 
+function renderTakeSkinsMenu() {
+  const text =
+    `🧹 *КЕРУВАННЯ СКІНАМИ (СКИДАННЯ ДО СТАНДАРТУ)*\n\n` +
+    `Тут ви можете забрати всі отримані скіни фокачі та залишити лише базову класичну фокачу:\n\n` +
+    `• *У всіх гравців* — глобальне скидання для всієї бази.\n` +
+    `• *У конкретного гравця* — скидання по @username або ID.`;
+  const reply_markup = {
+    inline_keyboard: [
+      [{ text: '🧹 Забрати скіни у ВСІХ гравців', callback_data: 'admin:takeskins_all' }],
+      [{ text: '👤 Забрати в конкретного гравця', callback_data: 'admin:prompt:takeskins' }],
+      [{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }],
+    ],
+  };
+  return { text, parse_mode: 'Markdown', reply_markup };
+}
+
 async function renderUserCard(target) {
   const uId = target.id;
   const stateRaw = (await redis('GET', `save:${uId}`))?.result;
@@ -1891,7 +1908,7 @@ async function renderUserCard(target) {
         { text: '📄 Дебаг-лог TXT', callback_data: `admin:user_aclog:${uId}` },
       ],
       [
-        { text: '🧹 Очистити нагороди', callback_data: `admin:user_clearreward:${uId}` },
+        { text: '🧹 Забрати скіни', callback_data: `admin:takeskins_target:${uId}` },
         { text: '🗑 Скинути акаунт', callback_data: `admin:user_reset_confirm:${uId}` },
       ],
       [
@@ -2110,12 +2127,19 @@ async function executeUpdateUsers(TOKEN, targetArg = '') {
         if (lbEntry) {
           lbEntry.n = finalName;
           lbEntry.u = finalUsername;
+          if (!lbEntry.av && finalUsername) {
+            lbEntry.av = `https://t.me/i/userpic/320/${finalUsername}.jpg`;
+          }
           await redis('HSET', 'leaderboard', String(id), JSON.stringify(lbEntry));
         }
 
         changes.push(`• ID \`${id}\`: ${oldName}${oldUsername ? ` (@${oldUsername})` : ''} ➔ *${finalName}*${finalUsername ? ` (@${finalUsername})` : ' (без юзернейму)'}`);
       } else {
         unchangedCount++;
+        if (lbEntry && !lbEntry.av && (finalUsername || oldUsername)) {
+          lbEntry.av = `https://t.me/i/userpic/320/${finalUsername || oldUsername}.jpg`;
+          await redis('HSET', 'leaderboard', String(id), JSON.stringify(lbEntry));
+        }
         if (oldUsername) {
           await redis('HSET', 'usernames', oldUsername.toLowerCase(), String(id));
         }
@@ -2263,6 +2287,53 @@ async function handleAdminAwaitInput(TOKEN, chatId, text, awaitData) {
 
   if (text.startsWith('/') && text !== '/cancel') {
     // allow slash commands
+  }
+
+  if (action === 'takeskins') {
+    const raw = text.trim();
+    if (raw.toLowerCase() === 'all' || raw.toLowerCase() === 'всім' || raw.toLowerCase() === 'все' || raw.toLowerCase() === 'всем') {
+      const resetTime = Date.now();
+      await redis('SET', 'global_skins_reset_time', String(resetTime));
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: `🧹 *Скидання скінів для ВСІХ гравців успішно активовано!*\n\nУ всіх гравців при вході або оновленні гри залишиться виключно стандартна класична фокача.`,
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '👑 До адмінки', callback_data: 'admin:back' }],
+          ],
+        },
+      });
+      return;
+    }
+    const target = await resolveTargetUser(raw);
+    if (!target) {
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: `❌ Користувача "${raw}" не знайдено в базі. Спробуйте інший @username або числовий Telegram ID.`,
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '🔄 Спробувати ще раз', callback_data: 'admin:prompt:takeskins' }],
+            [{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }],
+          ],
+        },
+      });
+      return;
+    }
+    const resetTime = Date.now();
+    await redis('SET', `reset_skins:${target.id}`, String(resetTime));
+    await sendTg(TOKEN, 'sendMessage', {
+      chat_id: chatId,
+      text: `🧹 *Скіни успішно забрано!*\n\nГравець: ${target.display}\nПри наступному вході або синхронізації всі додаткові скіни фокачі будуть очищені до стандарту.`,
+      parse_mode: 'Markdown',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '👤 Профіль гравця', callback_data: `admin:check_id:${target.id}` }],
+          [{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }],
+        ],
+      },
+    });
+    return;
   }
 
   if (action === 'give_self') {
@@ -3762,6 +3833,7 @@ module.exports = async function handler(req, res) {
         else if (sub === 'contests') menuData = await renderContestsAdminMenu();
         else if (sub === 'reset') menuData = renderResetMenu();
         else if (sub === 'lb_clear') menuData = renderLbClearConfirm();
+        else if (sub === 'takeskins') menuData = renderTakeSkinsMenu();
         else menuData = await getAdminPanelMessage();
 
         await sendTg(TOKEN, 'sendMessage', { chat_id: cqChat, ...menuData });
@@ -3777,6 +3849,46 @@ module.exports = async function handler(req, res) {
         if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
         const panel = await getAdminPanelMessage();
         await sendTg(TOKEN, 'sendMessage', { chat_id: cqChat, ...panel });
+        return res.status(200).json({ ok: true });
+      }
+
+      // Забрати скіни у ВСІХ гравців
+      if (action === 'takeskins_all') {
+        const resetTime = Date.now();
+        await redis('SET', 'global_skins_reset_time', String(resetTime));
+        if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+        await sendTg(TOKEN, 'sendMessage', {
+          chat_id: cqChat,
+          text: `🧹 *Скидання скінів активовано для ВСІХ гравців!*\n\nУ всіх гравців при вході/синхронізації залишиться лише стандартна класична фокача.`,
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '👑 До адмін-панелі', callback_data: 'admin:back' }],
+              [{ text: '🫓 Відкрити гру', web_app: { url: WEBAPP_URL } }],
+            ],
+          },
+        });
+        return res.status(200).json({ ok: true });
+      }
+
+      // Забрати скіни у конкретного гравця по ID з картки
+      if (action === 'takeskins_target') {
+        const targetId = parts[2];
+        const resetTime = Date.now();
+        await redis('SET', `reset_skins:${targetId}`, String(resetTime));
+        const targetUser = await resolveTargetUser(targetId);
+        if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+        await sendTg(TOKEN, 'sendMessage', {
+          chat_id: cqChat,
+          text: `🧹 *Скіни забрано у ${targetUser?.display || targetId}!*\n\nВсі скіни очищено до базової класичної фокачі.`,
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '👤 Профіль гравця', callback_data: `admin:check_id:${targetId}` }],
+              [{ text: '👑 Адмінка', callback_data: 'admin:back' }],
+            ],
+          },
+        });
         return res.status(200).json({ ok: true });
       }
 
@@ -3954,6 +4066,8 @@ module.exports = async function handler(req, res) {
           promptText = '✍️ *Скидання акаунту гравця*\nВведіть @username або ID гравця, якого потрібно скинути:';
         } else if (promptType === 'contest_id') {
           promptText = '✍️ *Перегляд учасників конкурсу*\nВведіть ID конкурсу (наприклад: `c_1712345678901`):';
+        } else if (promptType === 'takeskins') {
+          promptText = '✍️ *Забрати скіни у гравця*\nВведіть `@username`, числовий `ID` або слово `all` для скидання скінів усім:';
         }
 
         const pSent = await sendTg(TOKEN, 'sendMessage', {
@@ -4465,6 +4579,61 @@ module.exports = async function handler(req, res) {
           inline_keyboard: [
             [{ text: '👑 Адмін-панель', callback_data: 'admin:back' }],
             [{ text: '🫓 Відкрити гру', web_app: { url: WEBAPP_URL } }],
+          ],
+        },
+      });
+      return res.status(200).json({ ok: true });
+    }
+
+    // /take_skins [all | @username | ID] or /resetskins /clearskins
+    if (
+      cmd.startsWith('/take_skins') || cmd.startsWith('take_skins') ||
+      cmd.startsWith('/takeskins') || cmd.startsWith('takeskins') ||
+      cmd.startsWith('/resetskins') || cmd.startsWith('resetskins') ||
+      cmd.startsWith('/clearskins') || cmd.startsWith('clearskins') ||
+      cmd.startsWith('/забрать_скины') || cmd.startsWith('забрать_скины') ||
+      cmd.startsWith('/скины_сброс') || cmd.startsWith('скины_сброс')
+    ) {
+      const arg = text.replace(/^\/?(take_skins|takeskins|resetskins|clearskins|забрать_скины|скины_сброс)\s*/i, '').trim();
+      if (!arg) {
+        const menu = renderTakeSkinsMenu();
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, ...menu });
+        return res.status(200).json({ ok: true });
+      }
+      if (arg.toLowerCase() === 'all' || arg.toLowerCase() === 'всім' || arg.toLowerCase() === 'все' || arg.toLowerCase() === 'всем') {
+        const resetTime = Date.now();
+        await redis('SET', 'global_skins_reset_time', String(resetTime));
+        await sendTg(TOKEN, 'sendMessage', {
+          chat_id: chatId,
+          text: `🧹 *Скидання скінів активовано для ВСІХ гравців!*\n\nУ всіх гравців при вході/синхронізації залишиться лише стандартна класична фокача.`,
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '👑 До адмінки', callback_data: 'admin:back' }],
+              [{ text: '🫓 Відкрити гру', web_app: { url: WEBAPP_URL } }],
+            ],
+          },
+        });
+        return res.status(200).json({ ok: true });
+      }
+      const target = await resolveTargetUser(arg);
+      if (!target) {
+        await sendTg(TOKEN, 'sendMessage', {
+          chat_id: chatId,
+          text: `❌ Гравця "${arg}" не знайдено. Вкажіть @username, числовий ID або "all" для всіх.`,
+        });
+        return res.status(200).json({ ok: true });
+      }
+      const resetTime = Date.now();
+      await redis('SET', `reset_skins:${target.id}`, String(resetTime));
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: `🧹 *Скіни забрано у гравця ${target.display}!*\n\nВсі його скіни очищено до базової класичної фокачі.`,
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '👤 Профіль гравця', callback_data: `admin:check_id:${target.id}` }],
+            [{ text: '👑 Адмінка', callback_data: 'admin:back' }],
           ],
         },
       });

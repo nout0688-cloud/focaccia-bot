@@ -61,7 +61,7 @@ function parsePlayers(data, balanceMap = null, sortBy = 'total') {
         showcase: Array.isArray(p.sc) && p.sc.length ? p.sc : ['clicks', 'total', 'diamonds'],
         frame: p.fr || 'frame_default',
         color: p.cl || 'name_default',
-        avatar: p.av || '',
+        avatar: p.av || (p.u ? `https://t.me/i/userpic/320/${p.u}.jpg` : ''),
         online: !!p.ts && Date.now() - p.ts < ONLINE_MS,
         isDev: String(id) === String(ADMIN_ID),
       });
@@ -254,7 +254,8 @@ module.exports = async function handler(req, res) {
       const showcase = Array.isArray(body.showcase) ? body.showcase.slice(0, 3) : (prev?.sc || ['clicks', 'total', 'diamonds']);
       const frame = String(body.frame || prev?.fr || 'frame_default').slice(0, 32);
       const color = String(body.color || prev?.cl || 'name_default').slice(0, 32);
-      const avatar = String(body.avatar || prev?.av || '').slice(0, 256);
+      const rawAvatar = body.avatar || prev?.av || (username ? `https://t.me/i/userpic/320/${username}.jpg` : '');
+      const avatar = String(rawAvatar || '').slice(0, 1024);
       await redis('HSET', 'leaderboard', userId, JSON.stringify({
         n: name,
         u: username,
