@@ -1,7 +1,7 @@
 /**
- * API для отримання/скасування нагород та масової роздачі адміном.
+ * API для отримання/скасування нагород, масової роздачі адміном та режиму технічної перерви.
  * GET /api/reward?userId=<id>&lastReset=<ts>&lastSkinsReset=<ts>
- * POST /api/reward (action: 'distribute' | 'reset_skins_all')
+ * POST /api/reward (action: 'distribute' | 'reset_skins_all' | 'set_maintenance' | 'get_maintenance')
  */
 
 const ADMIN_ID = process.env.ADMIN_ID ? parseInt(process.env.ADMIN_ID, 10) : 1975429762;
@@ -38,6 +38,24 @@ module.exports = async function handler(req, res) {
   }
 
   const action = body.action || req.query.action;
+
+  // ===== 👑 ADMIN ACTION: SET MAINTENANCE MODE =====
+  if (action === 'set_maintenance') {
+    const reqAdminId = parseInt(body.adminId || req.query.adminId || '0', 10);
+    if (reqAdminId !== ADMIN_ID) {
+      return res.status(403).json({ ok: false, error: 'Unauthorized: admin only' });
+    }
+    const enabled = body.enabled === true || body.enabled === '1' || body.enabled === 1 || req.query.enabled === '1' || req.query.enabled === 'true';
+    await redis('SET', 'maintenance_mode', enabled ? '1' : '0');
+    return res.status(200).json({ ok: true, maintenance: enabled });
+  }
+
+  // ===== 👑 ACTION: GET MAINTENANCE STATUS =====
+  if (action === 'get_maintenance') {
+    const mRes = await redis('GET', 'maintenance_mode');
+    const isM = mRes?.result === '1';
+    return res.status(200).json({ ok: true, maintenance: isM });
+  }
 
   // ===== 👑 ADMIN ACTION: DISTRIBUTE TO ALL PLAYERS =====
   if (action === 'distribute') {
@@ -129,14 +147,21 @@ module.exports = async function handler(req, res) {
     return res.status(200).json({ ok: true, skinsResetTime: resetTime });
   }
 
+  // ===== Check maintenance mode from Redis =====
+  let isMaintenance = false;
+  try {
+    const mRes = await redis('GET', 'maintenance_mode');
+    isMaintenance = mRes?.result === '1';
+  } catch {}
+
   // ===== STANDARD USER REWARD CHECK =====
   const userId = req.query.userId || body.userId;
   const userLastReset = parseInt(req.query.lastReset || body.lastReset || '0');
   const userLastSkinsReset = parseInt(req.query.lastSkinsReset || body.lastSkinsReset || '0');
 
-  // Validate: userId must be a positive integer
+  // If userId is missing or 0, return current maintenance status
   if (!userId || !/^\d+$/.test(userId) || parseInt(userId, 10) <= 0) {
-    return res.status(400).json({ ok: false, error: 'invalid userId' });
+    return res.status(200).json({ ok: true, maintenance: isMaintenance });
   }
 
   try {
@@ -165,6 +190,7 @@ module.exports = async function handler(req, res) {
         reset: true,
         resetTime: Math.max(globalResetTime, Date.now()),
         karma,
+        maintenance: isMaintenance,
       });
     }
 
@@ -181,7 +207,7 @@ module.exports = async function handler(req, res) {
 
     // Карма < 25 — «Тінь бабусі»: нагороди від адміна не видаються (тримаються до прощення)
     if (karma < 25) {
-      return res.status(200).json({ ok: true, reward: 0, karma, resetSkins, skinsResetTime });
+      return res.status(200).json({ ok: true, reward: 0, karma, resetSkins, skinsResetTime, maintenance: isMaintenance });
     }
 
     const data = await redis('GET', `reward:${userId}`);
@@ -228,12 +254,13 @@ module.exports = async function handler(req, res) {
         karma,
         resetSkins,
         skinsResetTime,
+        maintenance: isMaintenance,
       });
     }
 
-    return res.status(200).json({ ok: true, reward: 0, karma, resetSkins, skinsResetTime });
+    return res.status(200).json({ ok: true, reward: 0, karma, resetSkins, skinsResetTime, maintenance: isMaintenance });
   } catch (err) {
     console.error('Reward error:', err);
-    return res.status(200).json({ ok: true, reward: 0 });
+    return res.status(200).json({ ok: true, reward: 0, maintenance: isMaintenance });
   }
 };

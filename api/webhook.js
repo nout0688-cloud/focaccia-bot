@@ -1066,15 +1066,25 @@ async function getAdminPanelMessage() {
   const activeContestsData = await redis('SMEMBERS', 'active_contests');
   const contestCount = activeContestsData?.result?.length || 0;
 
+  const mRes = await redis('GET', 'maintenance_mode');
+  const isMaintenance = mRes?.result === '1';
+
   const text =
     `👑 *ГОЛОВНА АДМІН ПАНЕЛЬ*\n\n` +
     `👥 Гравців у базі: *${userCount}*\n` +
     `⚠️ Детектів античиту: *${flagCount}*\n` +
-    `🎁 Активних конкурсів: *${contestCount}*\n\n` +
+    `🎁 Активних конкурсів: *${contestCount}*\n` +
+    `🚧 Технічна перерва: *${isMaintenance ? '🔴 УВІМКНЕНО (ГРА ЗАКРИТА)' : '🟢 ВИМКНЕНО (ГРА ВІДКРИТА)'}*\n\n` +
     `👇 *Оберіть дію або розділ керування:*`;
 
   const reply_markup = {
     inline_keyboard: [
+      [
+        {
+          text: isMaintenance ? '🟢 Відкрити гру (Вимкнути техперерву)' : '🔴 Закрити гру (Технічна перерва)',
+          callback_data: 'admin:toggle_maintenance',
+        },
+      ],
       [
         { text: '👥 Список гравців', callback_data: 'admin:users' },
         { text: '🔄 Оновити юзерів', callback_data: 'admin:update_users' },
@@ -3758,6 +3768,18 @@ module.exports = async function handler(req, res) {
         return res.status(200).json({ ok: true });
       }
 
+      // Перемикання режиму технічної перерви
+      if (action === 'toggle_maintenance') {
+        const mRes = await redis('GET', 'maintenance_mode');
+        const currentM = mRes?.result === '1';
+        const newM = !currentM;
+        await redis('SET', 'maintenance_mode', newM ? '1' : '0');
+        if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+        const panel = await getAdminPanelMessage();
+        await sendTg(TOKEN, 'sendMessage', { chat_id: cqChat, ...panel });
+        return res.status(200).json({ ok: true });
+      }
+
       // Список юзерів
       if (action === 'users') {
         await redis('DEL', `admin_await:${cqChat}`);
@@ -4412,6 +4434,40 @@ module.exports = async function handler(req, res) {
       }
       const panel = await getAdminPanelMessage();
       await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, ...panel });
+      return res.status(200).json({ ok: true });
+    }
+
+    // /maintenance [on|off] or /tech [on|off] — toggle game access
+    if (
+      cmd.startsWith('/maintenance') || cmd.startsWith('/tech') ||
+      cmd.startsWith('maintenance') || cmd.startsWith('tech') ||
+      cmd.startsWith('/тех') || cmd.startsWith('тех')
+    ) {
+      const arg = text.replace(/^\/?(maintenance|tech|тех)\s*/i, '').trim().toLowerCase();
+      let newM;
+      if (arg === 'on' || arg === '1' || arg === 'enable' || arg === 'закрити' || arg === 'вкл' || arg === 'вруби' || arg === 'включить') {
+        newM = true;
+      } else if (arg === 'off' || arg === '0' || arg === 'disable' || arg === 'відкрити' || arg === 'выкл' || arg === 'вируби' || arg === 'выключить') {
+        newM = false;
+      } else {
+        const mRes = await redis('GET', 'maintenance_mode');
+        newM = !(mRes?.result === '1');
+      }
+      await redis('SET', 'maintenance_mode', newM ? '1' : '0');
+      const statusText = newM
+        ? '🔴 *Технічну перерву УВІМКНЕНО!*\n\n🚫 Звичайні гравці бачать екран перерви та контакти підтримки (@hhimd).\n👑 Ви, як творець, маєте повний доступ до гри.'
+        : '🟢 *Технічну перерву ВИМКНЕНО!*\n\n✨ Доступ до гри повністю відкрито для всіх гравців.';
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: statusText,
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '👑 Адмін-панель', callback_data: 'admin:back' }],
+            [{ text: '🫓 Відкрити гру', web_app: { url: WEBAPP_URL } }],
+          ],
+        },
+      });
       return res.status(200).json({ ok: true });
     }
 
