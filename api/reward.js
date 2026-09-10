@@ -1,7 +1,11 @@
 /**
- * API для отримання/скасування нагород.
- * GET /api/reward?userId=<telegram_user_id> — повертає і видаляє очікувану нагороду.
+ * API для отримання/скасування нагород та масової роздачі адміном.
+ * GET /api/reward?userId=<id>&lastReset=<ts>&lastSkinsReset=<ts>
+ * POST /api/reward (action: 'distribute' | 'reset_skins_all')
  */
+
+const ADMIN_ID = process.env.ADMIN_ID ? parseInt(process.env.ADMIN_ID, 10) : 1975429762;
+const WEBAPP_URL = 'https://nout0688-cloud.github.io/focaccia-clicker/?v=1.4.0';
 
 async function redis(...args) {
   const url = process.env.KV_REST_API_URL;
@@ -18,15 +22,119 @@ async function redis(...args) {
 module.exports = async function handler(req, res) {
   // CORS headers for GitHub Pages
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
   if (req.method === 'OPTIONS') return res.status(200).end();
 
-  const userId = req.query.userId;
-  const userLastReset = parseInt(req.query.lastReset || '0');
+  // Parse body if present
+  let body = {};
+  if (req.body) {
+    if (typeof req.body === 'string') {
+      try { body = JSON.parse(req.body); } catch {}
+    } else if (typeof req.body === 'object') {
+      body = req.body;
+    }
+  }
 
-  // Validate: userId must be a positive integer (Telegram user IDs are numeric)
+  const action = body.action || req.query.action;
+
+  // ===== 👑 ADMIN ACTION: DISTRIBUTE TO ALL PLAYERS =====
+  if (action === 'distribute') {
+    const reqAdminId = parseInt(body.adminId || req.query.adminId || '0', 10);
+    if (reqAdminId !== ADMIN_ID) {
+      return res.status(403).json({ ok: false, error: 'Unauthorized: admin only' });
+    }
+
+    const cur = (body.cur || req.query.cur || 'foc').toLowerCase();
+    const amount = parseInt(body.amount || req.query.amount || '0', 10);
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ ok: false, error: 'invalid amount' });
+    }
+
+    try {
+      const ids = new Set();
+      const usersData = await redis('HGETALL', 'users');
+      if (usersData?.result) {
+        for (let i = 0; i < usersData.result.length; i += 2) {
+          ids.add(String(usersData.result[i]));
+        }
+      }
+      const lbData = await redis('HGETALL', 'leaderboard');
+      if (lbData?.result) {
+        for (let i = 0; i < lbData.result.length; i += 2) {
+          ids.add(String(lbData.result[i]));
+        }
+      }
+      ids.add(String(ADMIN_ID));
+
+      const idList = Array.from(ids);
+      const botToken = process.env.BOT_TOKEN;
+      const BATCH_SIZE = 10;
+      let successCount = 0;
+
+      for (let i = 0; i < idList.length; i += BATCH_SIZE) {
+        const batch = idList.slice(i, i + BATCH_SIZE);
+        await Promise.allSettled(
+          batch.map(async (uid) => {
+            if (cur === 'gem' || cur === 'diamonds') {
+              const ex = await redis('GET', `reward_gem:${uid}`);
+              const c = ex?.result ? parseInt(ex.result, 10) : 0;
+              await redis('SET', `reward_gem:${uid}`, String(c + amount));
+              await redis('SET', `reward_gem_source:${uid}`, 'admin');
+            } else {
+              const ex = await redis('GET', `reward:${uid}`);
+              const c = ex?.result ? parseInt(ex.result, 10) : 0;
+              await redis('SET', `reward:${uid}`, String(c + amount));
+              await redis('DEL', `deduct:${uid}`);
+            }
+            successCount++;
+
+            if (botToken) {
+              const textMsg = (cur === 'gem' || cur === 'diamonds')
+                ? `💎 *Адміністратор роздав усім гравцям по +${amount} 💎 алмазів!*\nЗайди в гру щоб отримати.`
+                : `🎁 *Адміністратор роздав усім гравцям по ${amount.toLocaleString()} фокач!*\n🫓 Зайди в гру щоб отримати.`;
+              fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  chat_id: Number(uid),
+                  text: textMsg,
+                  parse_mode: 'Markdown',
+                  reply_markup: {
+                    inline_keyboard: [[{ text: '🫓 Забрати нагороду!', web_app: { url: WEBAPP_URL } }]],
+                  },
+                }),
+              }).catch(() => {});
+            }
+          })
+        );
+      }
+
+      return res.status(200).json({ ok: true, count: successCount, amount, cur });
+    } catch (err) {
+      console.error('Distribute error:', err);
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+  }
+
+  // ===== 👑 ADMIN ACTION: WIPE ALL SKINS TO CLASSIC =====
+  if (action === 'reset_skins_all') {
+    const reqAdminId = parseInt(body.adminId || req.query.adminId || '0', 10);
+    if (reqAdminId !== ADMIN_ID) {
+      return res.status(403).json({ ok: false, error: 'Unauthorized: admin only' });
+    }
+    const resetTime = Date.now();
+    await redis('SET', 'global_skins_reset_time', String(resetTime));
+    return res.status(200).json({ ok: true, skinsResetTime: resetTime });
+  }
+
+  // ===== STANDARD USER REWARD CHECK =====
+  const userId = req.query.userId || body.userId;
+  const userLastReset = parseInt(req.query.lastReset || body.lastReset || '0');
+  const userLastSkinsReset = parseInt(req.query.lastSkinsReset || body.lastSkinsReset || '0');
+
+  // Validate: userId must be a positive integer
   if (!userId || !/^\d+$/.test(userId) || parseInt(userId, 10) <= 0) {
     return res.status(400).json({ ok: false, error: 'invalid userId' });
   }
@@ -60,9 +168,20 @@ module.exports = async function handler(req, res) {
       });
     }
 
+    // Check global skins wipe
+    let resetSkins = false;
+    let skinsResetTime = 0;
+    const globalSkinsResetData = await redis('GET', 'global_skins_reset_time');
+    if (globalSkinsResetData?.result) {
+      skinsResetTime = parseInt(globalSkinsResetData.result, 10);
+      if (skinsResetTime > 0 && userLastSkinsReset < skinsResetTime) {
+        resetSkins = true;
+      }
+    }
+
     // Карма < 25 — «Тінь бабусі»: нагороди від адміна не видаються (тримаються до прощення)
     if (karma < 25) {
-      return res.status(200).json({ ok: true, reward: 0, karma });
+      return res.status(200).json({ ok: true, reward: 0, karma, resetSkins, skinsResetTime });
     }
 
     const data = await redis('GET', `reward:${userId}`);
@@ -85,7 +204,7 @@ module.exports = async function handler(req, res) {
     const patronData = await redis('HGET', `user_extra:${userId}`, 'badge_patron');
     const patronBadge = patronData?.result === '1';
 
-    if (amount > 0 || rebirths > 0 || diamonds > 0 || deduct > 0 || extraUpgrade || patronBadge) {
+    if (amount > 0 || rebirths > 0 || diamonds > 0 || deduct > 0 || extraUpgrade || patronBadge || resetSkins) {
       // Clear pending grants after claiming
       if (amount > 0) await redis('DEL', `reward:${userId}`);
       if (rebirths > 0) await redis('DEL', `rebirth:${userId}`);
@@ -107,10 +226,12 @@ module.exports = async function handler(req, res) {
         extraUpgrade,
         patronBadge,
         karma,
+        resetSkins,
+        skinsResetTime,
       });
     }
 
-    return res.status(200).json({ ok: true, reward: 0, karma });
+    return res.status(200).json({ ok: true, reward: 0, karma, resetSkins, skinsResetTime });
   } catch (err) {
     console.error('Reward error:', err);
     return res.status(200).json({ ok: true, reward: 0 });

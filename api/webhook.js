@@ -1203,7 +1203,37 @@ function renderGiveMenu() {
         { text: '👤 Видати гравцю (@ або ID)', callback_data: 'admin:prompt:giveto' },
       ],
       [
+        { text: '🌍 Роздати ВСІМ гравцям 🫓', callback_data: 'admin:menu:giveall' },
+      ],
+      [
         { text: '⬅️ Назад до адмінки', callback_data: 'admin:back' },
+      ],
+    ],
+  };
+  return { text, parse_mode: 'Markdown', reply_markup };
+}
+
+function renderGiveAllMenu() {
+  const text =
+    `🌍 *РОЗДАЧА ФОКАЧ ВСІМ ГРАВЦЯМ*\n\n` +
+    `Виберіть суму фокач, яку отримає *кожен* зареєстрований гравець:\n` +
+    `(Усі гравці отримають сповіщення від бота з кнопкою «Забрати нагороду»)`;
+  const reply_markup = {
+    inline_keyboard: [
+      [
+        { text: '🌍 Всім по 10 млн 🫓', callback_data: 'admin:giveall_exec:10000000' },
+        { text: '🌍 Всім по 50 млн 🫓', callback_data: 'admin:giveall_exec:50000000' },
+      ],
+      [
+        { text: '🌍 Всім по 100 млн 🫓', callback_data: 'admin:giveall_exec:100000000' },
+        { text: '🌍 Всім по 500 млн 🫓', callback_data: 'admin:giveall_exec:500000000' },
+      ],
+      [
+        { text: '🌍 Всім по 1 млрд 🫓', callback_data: 'admin:giveall_exec:1000000000' },
+        { text: '✍️ Своя сума всім', callback_data: 'admin:prompt:giveall' },
+      ],
+      [
+        { text: '⬅️ Назад до видачі', callback_data: 'admin:menu:give' },
       ],
     ],
   };
@@ -1265,7 +1295,37 @@ function renderDiamondsMenu() {
         { text: '👤 Видати гравцю (@ або ID)', callback_data: 'admin:prompt:diamondto' },
       ],
       [
+        { text: '🌍 Роздати ВСІМ гравцям 💎', callback_data: 'admin:menu:diamondall' },
+      ],
+      [
         { text: '⬅️ Назад до адмінки', callback_data: 'admin:back' },
+      ],
+    ],
+  };
+  return { text, parse_mode: 'Markdown', reply_markup };
+}
+
+function renderDiamondAllMenu() {
+  const text =
+    `🌍 *РОЗДАЧА АЛМАЗІВ ВСІМ ГРАВЦЯМ*\n\n` +
+    `Виберіть кількість 💎 алмазів, яку отримає *кожен* зареєстрований гравець:\n` +
+    `(Усі гравці отримають сповіщення від бота)`;
+  const reply_markup = {
+    inline_keyboard: [
+      [
+        { text: '🌍 Всім по 25 💎', callback_data: 'admin:diamondall_exec:25' },
+        { text: '🌍 Всім по 50 💎', callback_data: 'admin:diamondall_exec:50' },
+      ],
+      [
+        { text: '🌍 Всім по 100 💎', callback_data: 'admin:diamondall_exec:100' },
+        { text: '🌍 Всім по 500 💎', callback_data: 'admin:diamondall_exec:500' },
+      ],
+      [
+        { text: '🌍 Всім по 1,000 💎', callback_data: 'admin:diamondall_exec:1000' },
+        { text: '✍️ Своя кількість всім', callback_data: 'admin:prompt:diamondall' },
+      ],
+      [
+        { text: '⬅️ Назад до алмазів', callback_data: 'admin:menu:diamonds' },
       ],
     ],
   };
@@ -2073,6 +2133,120 @@ async function executeUpdateUsers(TOKEN, targetArg = '') {
   return report;
 }
 
+async function getAllPlayerIds() {
+  const ids = new Set();
+  const usersData = await redis('HGETALL', 'users');
+  if (usersData?.result) {
+    for (let i = 0; i < usersData.result.length; i += 2) {
+      ids.add(String(usersData.result[i]));
+    }
+  }
+  const lbData = await redis('HGETALL', 'leaderboard');
+  if (lbData?.result) {
+    for (let i = 0; i < lbData.result.length; i += 2) {
+      ids.add(String(lbData.result[i]));
+    }
+  }
+  if (ADMIN_ID) ids.add(String(ADMIN_ID));
+  return Array.from(ids);
+}
+
+async function executeGiveAll(TOKEN, adminChatId, amount) {
+  const targetIds = await getAllPlayerIds();
+  if (targetIds.length === 0) {
+    await sendTg(TOKEN, 'sendMessage', { chat_id: adminChatId, text: '❌ Гравців у базі не знайдено.' });
+    return;
+  }
+  await sendTg(TOKEN, 'sendMessage', {
+    chat_id: adminChatId,
+    text: `⏳ Роздаю по *${amount.toLocaleString()}* фокач для *${targetIds.length}* гравців...`,
+    parse_mode: 'Markdown',
+  });
+
+  const BATCH_SIZE = 10;
+  let sent = 0;
+  for (let i = 0; i < targetIds.length; i += BATCH_SIZE) {
+    const batch = targetIds.slice(i, i + BATCH_SIZE);
+    await Promise.allSettled(
+      batch.map(async (uid) => {
+        const ex = await redis('GET', `reward:${uid}`);
+        const curR = ex?.result ? parseInt(ex.result, 10) : 0;
+        await redis('SET', `reward:${uid}`, String(curR + amount));
+        await redis('DEL', `deduct:${uid}`);
+        sent++;
+        await sendTg(TOKEN, 'sendMessage', {
+          chat_id: Number(uid),
+          text: `🎁 *Тобі нараховано ${amount.toLocaleString()} фокач від адміна!*\n🫓 Зайди в гру щоб отримати.`,
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [[{ text: '🫓 Забрати нагороду!', web_app: { url: WEBAPP_URL } }]],
+          },
+        }).catch(() => {});
+      })
+    );
+  }
+
+  await sendTg(TOKEN, 'sendMessage', {
+    chat_id: adminChatId,
+    text: `✅ Успішно нараховано по *${amount.toLocaleString()}* фокач для *${sent}* гравців!`,
+    parse_mode: 'Markdown',
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: '🎁 Меню видачі', callback_data: 'admin:menu:give' }],
+        [{ text: '⬅️ Головне меню', callback_data: 'admin:back' }],
+      ],
+    },
+  });
+}
+
+async function executeDiamondAll(TOKEN, adminChatId, amount) {
+  const targetIds = await getAllPlayerIds();
+  if (targetIds.length === 0) {
+    await sendTg(TOKEN, 'sendMessage', { chat_id: adminChatId, text: '❌ Гравців у базі не знайдено.' });
+    return;
+  }
+  await sendTg(TOKEN, 'sendMessage', {
+    chat_id: adminChatId,
+    text: `⏳ Роздаю по *+${amount}* 💎 алмазів для *${targetIds.length}* гравців...`,
+    parse_mode: 'Markdown',
+  });
+
+  const BATCH_SIZE = 10;
+  let sent = 0;
+  for (let i = 0; i < targetIds.length; i += BATCH_SIZE) {
+    const batch = targetIds.slice(i, i + BATCH_SIZE);
+    await Promise.allSettled(
+      batch.map(async (uid) => {
+        const ex = await redis('GET', `reward_gem:${uid}`);
+        const curR = ex?.result ? parseInt(ex.result, 10) : 0;
+        await redis('SET', `reward_gem:${uid}`, String(curR + amount));
+        await redis('SET', `reward_gem_source:${uid}`, 'admin');
+        sent++;
+        await sendTg(TOKEN, 'sendMessage', {
+          chat_id: Number(uid),
+          text: `💎 *Тобі нараховано +${amount} 💎 алмазів від адміна!*\nЗайди в гру щоб отримати.`,
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [[{ text: '🫓 Забрати алмази!', web_app: { url: WEBAPP_URL } }]],
+          },
+        }).catch(() => {});
+      })
+    );
+  }
+
+  await sendTg(TOKEN, 'sendMessage', {
+    chat_id: adminChatId,
+    text: `✅ Успішно нараховано по *+${amount}* 💎 алмазів для *${sent}* гравців!`,
+    parse_mode: 'Markdown',
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: '💎 Меню алмазів', callback_data: 'admin:menu:diamonds' }],
+        [{ text: '⬅️ Головне меню', callback_data: 'admin:back' }],
+      ],
+    },
+  });
+}
+
 async function handleAdminAwaitInput(TOKEN, chatId, text, awaitData) {
   const action = awaitData?.action;
   const targetId = awaitData?.targetId;
@@ -2466,6 +2640,44 @@ async function handleAdminAwaitInput(TOKEN, chatId, text, awaitData) {
 
     const card = await renderUserCard(target);
     await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, ...card });
+    return;
+  }
+
+  if (action === 'giveall') {
+    const amt = parseAmountInput(text);
+    if (!amt || amt <= 0) {
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: '❌ Некоректна сума фокач. Вкажіть число (наприклад: 50m або 100000000):',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '✍️ Спробувати ще раз', callback_data: 'admin:prompt:giveall' }],
+            [{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }],
+          ],
+        },
+      });
+      return;
+    }
+    await executeGiveAll(TOKEN, chatId, amt);
+    return;
+  }
+
+  if (action === 'diamondall') {
+    const amt = parseAmountInput(text);
+    if (!amt || amt <= 0) {
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: '❌ Некоректна кількість алмазів. Вкажіть число (наприклад: 50 або 500):',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '✍️ Спробувати ще раз', callback_data: 'admin:prompt:diamondall' }],
+            [{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }],
+          ],
+        },
+      });
+      return;
+    }
+    await executeDiamondAll(TOKEN, chatId, amt);
     return;
   }
 
@@ -3532,7 +3744,9 @@ module.exports = async function handler(req, res) {
 
         let menuData;
         if (sub === 'give') menuData = renderGiveMenu();
+        else if (sub === 'giveall') menuData = renderGiveAllMenu();
         else if (sub === 'diamonds') menuData = renderDiamondsMenu();
+        else if (sub === 'diamondall') menuData = renderDiamondAllMenu();
         else if (sub === 'rebirth') menuData = renderRebirthMenu();
         else if (sub === 'anticheat') menuData = await renderAnticheatMenu();
         else if (sub === 'contests') menuData = await renderContestsAdminMenu();
@@ -3569,6 +3783,26 @@ module.exports = async function handler(req, res) {
             ],
           },
         });
+        return res.status(200).json({ ok: true });
+      }
+
+      // Роздача фокач ВСІМ (готові пресети)
+      if (action === 'giveall_exec') {
+        const amt = parseInt(parts[2], 10);
+        if (amt && amt > 0) {
+          if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+          await executeGiveAll(TOKEN, cqChat, amt);
+        }
+        return res.status(200).json({ ok: true });
+      }
+
+      // Роздача алмазів ВСІМ (готові пресети)
+      if (action === 'diamondall_exec') {
+        const amt = parseInt(parts[2], 10);
+        if (amt && amt > 0) {
+          if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+          await executeDiamondAll(TOKEN, cqChat, amt);
+        }
         return res.status(200).json({ ok: true });
       }
 
@@ -3662,6 +3896,10 @@ module.exports = async function handler(req, res) {
           promptText = '✍️ *Введіть суму фокач для видачі собі:*\n(Можна вказувати `10m`, `500k`, `1b`, `50 000 000`)';
         } else if (promptType === 'diamond_self') {
           promptText = '✍️ *Введіть кількість алмазів для видачі собі:*\n(Наприклад: `25`, `100`, `1000`)';
+        } else if (promptType === 'giveall') {
+          promptText = '✍️ *Роздача фокач ВСІМ зареєстрованим гравцям:*\nВведіть суму, яку отримає кожен (наприклад: `10m`, `50m`, `100 000 000`):';
+        } else if (promptType === 'diamondall') {
+          promptText = '✍️ *Роздача алмазів ВСІМ зареєстрованим гравцям:*\nВведіть кількість 💎, яку отримає кожен (наприклад: `25`, `50`, `100`, `500`):';
         } else if (promptType === 'rebirth_self') {
           promptText = '✍️ *Введіть кількість ребіртхів для видачі собі:*\n(Наприклад: `5`, `10`, `25`)';
         } else if (promptType === 'giveto') {
@@ -4426,8 +4664,53 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: true });
     }
 
+    // /giveall <amount> — give focaccia to all players
+    if (
+      cmd.startsWith('/giveall ') || cmd.startsWith('giveall ') ||
+      cmd.startsWith('/give_all ') || cmd.startsWith('give_all ') ||
+      cmd.startsWith('/роздати ') || cmd.startsWith('роздати ')
+    ) {
+      const rawAmt = text.replace(/^\/?(giveall|give_all|роздати)\s+/i, '').trim();
+      const amount = parseAmountInput(rawAmt);
+      if (!amount || amount <= 0) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Вкажи суму фокач: `/giveall 50m` або `/giveall 100000000`', parse_mode: 'Markdown' });
+        return res.status(200).json({ ok: true });
+      }
+      await executeGiveAll(TOKEN, chatId, amount);
+      return res.status(200).json({ ok: true });
+    }
+
+    // /diamondall <amount> — give diamonds to all players
+    if (
+      cmd.startsWith('/diamondall ') || cmd.startsWith('diamondall ') ||
+      cmd.startsWith('/diamond_all ') || cmd.startsWith('diamond_all ') ||
+      cmd.startsWith('/gemall ') || cmd.startsWith('gemall ') ||
+      cmd.startsWith('/gemsall ') || cmd.startsWith('gemsall ') ||
+      cmd.startsWith('/роздати_алмази ') || cmd.startsWith('роздати_алмази ')
+    ) {
+      const rawAmt = text.replace(/^\/?(diamondall|diamond_all|gemall|gemsall|роздати_алмази)\s+/i, '').trim();
+      const amount = parseAmountInput(rawAmt);
+      if (!amount || amount <= 0) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Вкажи кількість алмазів: `/diamondall 50` або `/diamondall 500`', parse_mode: 'Markdown' });
+        return res.status(200).json({ ok: true });
+      }
+      await executeDiamondAll(TOKEN, chatId, amount);
+      return res.status(200).json({ ok: true });
+    }
+
+    // /reset_skins_all — wipe skins for all players to classic
+    if (cmd === '/reset_skins_all' || cmd === 'reset_skins_all' || cmd === '/скинути_скіни' || cmd === 'скинути_скіни') {
+      await redis('SET', 'global_skins_reset_time', String(Date.now()));
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: '✅ *Глобальне скидання скінів активовано!*\nУсі скіни у всіх гравців скинуто до стандартної класичної фокачі.',
+        parse_mode: 'Markdown',
+      });
+      return res.status(200).json({ ok: true });
+    }
+
     // /give <amount> — give focaccia to yourself
-    if ((cmd.startsWith('/give ') || cmd.startsWith('give ')) && !cmd.includes('giveto')) {
+    if ((cmd.startsWith('/give ') || cmd.startsWith('give ')) && !cmd.includes('giveto') && !cmd.includes('giveall')) {
       const amount = parseInt(text.replace(/^\/?give\s+/i, '').trim());
       if (!amount || amount <= 0) {
         await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Вкажи кількість: /give <число>' });
@@ -4613,7 +4896,7 @@ module.exports = async function handler(req, res) {
        cmd.startsWith('/diamonds ') || cmd.startsWith('diamonds ') ||
        cmd.startsWith('/gem ') || cmd.startsWith('gem ') ||
        cmd.startsWith('/gems ') || cmd.startsWith('gems ')) &&
-      !cmd.includes('to')
+      !cmd.includes('to') && !cmd.includes('all')
     ) {
       const amount = parseInt(text.replace(/^\/?(diamonds?|gems?)\s+/i, '').trim());
       if (!amount || amount <= 0) {
