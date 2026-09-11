@@ -4707,7 +4707,44 @@ module.exports = async function handler(req, res) {
     const cmd = text.toLowerCase();
 
     // ===== /start =====
-    if (cmd === '/start' || cmd === 'start' || cmd === 'старт') {
+    if (cmd.startsWith('/start') || cmd === 'start' || cmd === 'старт') {
+      const parts = text.trim().split(/\s+/);
+      const startParam = parts[1] || '';
+
+      // Deep link to Trade: /start trade_tr_... or /start tr_...
+      if (startParam.startsWith('trade_') || startParam.startsWith('tr_')) {
+        const tradeId = startParam.startsWith('trade_') ? startParam.replace('trade_', '') : startParam;
+        const tradeUrl = `https://nout0688-cloud.github.io/focaccia-clicker/?v=1.4.0&trade=${tradeId}`;
+        await sendTg(TOKEN, 'sendMessage', {
+          chat_id: chatId,
+          text: `🤝 *Запрошення до безпечного обміну (Трейд)*\n\nТебе запросили у кімнату обміну! Обмінюйся фокачами 🫓, алмазами 💎 та рідкісними скінами.\n\nНатисни кнопку нижче, щоб відкрити кімнату:`,
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🤝 Увійти в трейд', web_app: { url: tradeUrl } }],
+            ],
+          },
+        });
+        return res.status(200).json({ ok: true });
+      }
+
+      // Deep link to Duel: /start duel_... or /start d_...
+      if (startParam.startsWith('duel_') || startParam.startsWith('d_') || startParam === 'duel') {
+        const duelId = (startParam === 'duel' || startParam === 'duel_lobby') ? 'lobby' : startParam.replace(/^duel_/, '');
+        const duelUrl = `https://nout0688-cloud.github.io/focaccia-clicker/?v=1.4.0&duel=${duelId}`;
+        await sendTg(TOKEN, 'sendMessage', {
+          chat_id: chatId,
+          text: `⚔️ *Виклик на дуель 1 на 1!*\n\nТебе викликали на бій у Фокача Клікері!\nНатисни кнопку нижче, щоб прийняти виклик:`,
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '⚔️ Відкрити дуель', web_app: { url: duelUrl } }],
+            ],
+          },
+        });
+        return res.status(200).json({ ok: true });
+      }
+
       const welcome =
         `Привіт, ${name}! 👋\n\n` +
         `🫓 Фокача Клікер — клікай, їж, прокачуйся!\n\n` +
@@ -4727,7 +4764,7 @@ module.exports = async function handler(req, res) {
         reply_markup: {
           inline_keyboard: [
             [{ text: '🫓 Грати у Фокача Клікер!', web_app: { url: WEBAPP_URL } }],
-            [{ text: '⚔️ Дуэль', callback_data: 'duel:menu' }],
+            [{ text: '⚔️ Дуель', callback_data: 'duel:menu' }],
           ],
         },
       });

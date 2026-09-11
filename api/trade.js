@@ -110,12 +110,13 @@ module.exports = async function handler(req, res) {
 
     // 2. Створити сесію трейду
     if (action === 'create') {
-      const from = String(body.from || '');
-      const to = body.to ? String(body.to) : null;
+      const from = String(body.from || '').trim();
+      const rawTo = body.to !== undefined && body.to !== null ? String(body.to).trim() : '';
+      const to = (rawTo && rawTo !== 'null' && rawTo !== 'undefined' && rawTo !== '0') ? rawTo : null;
       const fromName = String(body.fromName || 'Гравець').slice(0, 24);
       const fromU = String(body.fromU || '').slice(0, 32);
 
-      if (!/^\d{1,20}$/.test(from)) {
+      if (!from || !/^[a-zA-Z0-9_-]{1,40}$/.test(from)) {
         return res.status(400).json({ ok: false, error: 'invalid_from' });
       }
       if (to && from === to) {
@@ -159,11 +160,34 @@ module.exports = async function handler(req, res) {
     }
 
     // Параметри для наступних дій:
-    const tradeId = String(body.tradeId || req.query.tradeId || '');
-    const userId = String(body.userId || req.query.userId || '');
+    const tradeId = String(body.tradeId || req.query.tradeId || '').trim();
+    const userId = String(body.userId || req.query.userId || '').trim();
 
-    if (!tradeId || !userId) {
-      return res.status(400).json({ ok: false, error: 'missing_params' });
+    if (!tradeId) {
+      return res.status(400).json({ ok: false, error: 'missing_tradeId' });
+    }
+
+    // 2.1 Попередній перегляд трейду (без вимоги бути учасником)
+    if (action === 'preview') {
+      const trade = await getTrade(tradeId);
+      if (!trade) return res.status(200).json({ ok: false, error: 'not_found' });
+      const hasP2 = Boolean(trade.p2 && trade.p2.id && trade.p2.id !== 'null' && trade.p2.id !== 'undefined');
+      return res.status(200).json({
+        ok: true,
+        trade: {
+          id: trade.id,
+          stage: trade.stage,
+          p1: { name: trade.p1.name, u: trade.p1.u },
+          p2: hasP2 ? { name: trade.p2.name, u: trade.p2.u } : null,
+          hasP2,
+          isP1: trade.p1.id === userId,
+          isP2: hasP2 && trade.p2.id === userId,
+        },
+      });
+    }
+
+    if (!userId) {
+      return res.status(400).json({ ok: false, error: 'missing_userId' });
     }
 
     const trade = await getTrade(tradeId);
@@ -171,8 +195,12 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: false, error: 'not_found' });
     }
 
-    // Приєднання до відкритого посилання (open trade), якщо p2 ще немає
-    if (!trade.p2 && trade.p1.id !== userId) {
+    let isP1 = trade.p1.id === userId;
+    let isP2 = Boolean(trade.p2 && trade.p2.id === userId);
+    const isP2Empty = !trade.p2 || !trade.p2.id || trade.p2.id === 'null' || trade.p2.id === 'undefined';
+
+    // Приєднання до відкритого посилання (open trade), якщо p2 ще немає і гравець не p1
+    if (!isP1 && !isP2 && isP2Empty) {
       trade.p2 = {
         id: userId,
         name: String(body.name || 'Гравець').slice(0, 24),
@@ -180,10 +208,8 @@ module.exports = async function handler(req, res) {
       };
       trade.p2Seen = now;
       await saveTrade(trade);
+      isP2 = true;
     }
-
-    const isP1 = trade.p1.id === userId;
-    const isP2 = trade.p2?.id === userId;
 
     if (!isP1 && !isP2) {
       return res.status(200).json({ ok: false, error: 'not_a_participant' });
@@ -198,6 +224,45 @@ module.exports = async function handler(req, res) {
       trade.p2Seen = now;
       if (body.name) trade.p2.name = String(body.name).slice(0, 24);
       if (body.u) trade.p2.u = String(body.u).slice(0, 32);
+    }
+
+    // 2.2 Явне приєднання або отримання поточного стану
+    if (action === 'join' || action === 'get_trade') {
+      await saveTrade(trade);
+      const me = isP1 ? trade.p1 : trade.p2;
+      const opp = isP1 ? trade.p2 : trade.p1;
+      const meOffer = isP1 ? trade.p1Offer : trade.p2Offer;
+      const oppOffer = isP1 ? trade.p2Offer : trade.p1Offer;
+      const meLocked = isP1 ? trade.p1Locked : trade.p2Locked;
+      const oppLocked = isP1 ? trade.p2Locked : trade.p1Locked;
+      const meConfirmed = isP1 ? trade.p1Confirmed : trade.p2Confirmed;
+      const oppConfirmed = isP1 ? trade.p2Confirmed : trade.p1Confirmed;
+      const oppSeen = isP1 ? trade.p2Seen : trade.p1Seen;
+
+      return res.status(200).json({
+        ok: true,
+        stage: trade.stage,
+        completedAt: trade.completedAt,
+        cancelledReason: trade.cancelledReason,
+        serverNow: now,
+        me: {
+          id: me?.id,
+          name: me?.name,
+          u: me?.u,
+          offer: meOffer,
+          locked: meLocked,
+          confirmed: meConfirmed,
+        },
+        opp: (opp && opp.id && opp.id !== 'null' && opp.id !== 'undefined') ? {
+          id: opp.id,
+          name: opp.name || 'Партнер',
+          u: opp.u || '',
+          offer: oppOffer,
+          locked: oppLocked,
+          confirmed: oppConfirmed,
+          online: (now - oppSeen) < 10000,
+        } : null,
+      });
     }
 
     // 3. Синхронізація пропозицій (Sync)
