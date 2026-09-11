@@ -3398,6 +3398,168 @@ module.exports = async function handler(req, res) {
       }
     }
 
+    // ===== 🤝 ТРЕЙДИ: callback-кнопки =====
+    if (cq && typeof cq.data === 'string' && cq.data.startsWith('trade:')) {
+      try {
+        await fetch(`https://api.telegram.org/bot${TOKEN}/answerCallbackQuery`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ callback_query_id: cq.id }),
+        });
+      } catch { /* ignore */ }
+
+      const cqChat = cq.message?.chat?.id ?? cq.from.id;
+      const parts = cq.data.split(':');
+      const tAction = parts[1];
+      const tArg = parts[2];
+
+      if (cq.message?.message_id && cqChat && tAction !== 'menu') {
+        scheduleMessageDeletion(cqChat, cq.message.message_id, DUEL_MSG_CLEANUP_TTL).catch(() => {});
+      }
+
+      try {
+        // Меню вибору партнерів
+        if (tAction === 'menu') {
+          await sendDuelTg(TOKEN, 'sendMessage', {
+            chat_id: Number(cqChat),
+            text: '🤝 *Меню безпечних Трейдів*\nОбмінюйся фокачами 🫓, алмазами 💎 та скінами 🎨 в окремому міні-аппі!',
+            parse_mode: 'Markdown',
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '👥 Зі списку гравців', callback_data: 'trade:players' }],
+                [{ text: '🔍 За юзернеймом', callback_data: 'trade:byname' }],
+                [{ text: '🔗 Створити відкритий трейд', callback_data: 'trade:open' }],
+              ],
+            },
+          });
+          return res.status(200).json({ ok: true });
+        }
+
+        // Список останніх активних гравців
+        if (tAction === 'players') {
+          const usersData = await redis('HGETALL', 'users');
+          const list = [];
+          if (usersData?.result) {
+            for (let i = 0; i < usersData.result.length; i += 2) {
+              if (String(usersData.result[i]) === String(cqChat)) continue;
+              try {
+                const u = JSON.parse(usersData.result[i + 1]);
+                list.push({ id: usersData.result[i], name: u.name, username: u.username, last: u.lastActive || 0 });
+              } catch { /* skip */ }
+            }
+            list.sort((a, b) => b.last - a.last);
+          }
+          if (list.length === 0) {
+            await sendDuelTg(TOKEN, 'sendMessage', { chat_id: Number(cqChat), text: '👥 Поки немає інших гравців онлайн. Створи відкритий трейд і надішли другові!' });
+            return res.status(200).json({ ok: true });
+          }
+          const top = list.slice(0, 20);
+          const rows = [];
+          for (let i = 0; i < top.length; i += 2) {
+            rows.push(top.slice(i, i + 2).map((p) => ({ text: p.username ? `@${p.username}` : p.name, callback_data: `trade:chal:${p.id}` })));
+          }
+          rows.push([{ text: '❌ Скасувати', callback_data: 'trade:cancel' }]);
+          await sendDuelTg(TOKEN, 'sendMessage', { chat_id: Number(cqChat), text: '👥 Обери гравця для обміну:', reply_markup: { inline_keyboard: rows } });
+          return res.status(200).json({ ok: true });
+        }
+
+        // Очікування юзернейму
+        if (tAction === 'byname') {
+          await redis('SET', `trade_await:${cqChat}`, 'trade', 'EX', 300);
+          await sendDuelTg(TOKEN, 'sendMessage', { chat_id: Number(cqChat), text: '✍️ Введи @username або числовий ID партнера для обміну:' });
+          return res.status(200).json({ ok: true });
+        }
+
+        // Прямий виклик на трейд
+        if (tAction === 'chal' && tArg) {
+          if (String(tArg) === String(cqChat)) {
+            await sendDuelTg(TOKEN, 'sendMessage', { chat_id: Number(cqChat), text: '❌ Не можна трейдитися із самим собою' });
+            return res.status(200).json({ ok: true });
+          }
+          const host = req.headers.host || 'focaccia-bot.vercel.app';
+          const myName = (cq.from?.first_name || 'Гравець').slice(0, 24);
+          const myU = (cq.from?.username || '').slice(0, 32);
+
+          const apiRes = await fetch(`https://${host}/api/trade`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'create', from: cqChat, to: tArg, fromName: myName, fromU: myU }),
+          });
+          const data = await apiRes.json();
+          if (data?.ok) {
+            const kb = {
+              inline_keyboard: [
+                [{ text: '🤝 Увійти в трейд', web_app: { url: data.url } }],
+              ],
+            };
+            await sendDuelTg(TOKEN, 'sendMessage', {
+              chat_id: Number(cqChat),
+              text: `🤝 Запрошення до трейду надіслано гравцю!\nНатисни кнопку нижче, щоб відкрити кімнату обміну:`,
+              reply_markup: kb,
+            });
+          } else {
+            await sendDuelTg(TOKEN, 'sendMessage', { chat_id: Number(cqChat), text: '❌ Не вдалося створити трейд. Спробуй пізніше.' });
+          }
+          return res.status(200).json({ ok: true });
+        }
+
+        // Створення відкритого трейду
+        if (tAction === 'open') {
+          const host = req.headers.host || 'focaccia-bot.vercel.app';
+          const myName = (cq.from?.first_name || 'Гравець').slice(0, 24);
+          const myU = (cq.from?.username || '').slice(0, 32);
+
+          const apiRes = await fetch(`https://${host}/api/trade`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'create', from: cqChat, to: null, fromName: myName, fromU: myU }),
+          });
+          const data = await apiRes.json();
+          if (data?.ok) {
+            const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(data.url)}&text=${encodeURIComponent('🤝 Заходь у мій трейд у Фокача Клікері! Обміняємося фокачами, алмазами чи скінами.')}`;
+            const kb = {
+              inline_keyboard: [
+                [{ text: '🤝 Увійти в свій трейд', web_app: { url: data.url } }],
+                [{ text: '📤 Поділитися посиланням', url: shareUrl }],
+              ],
+            };
+            await sendDuelTg(TOKEN, 'sendMessage', {
+              chat_id: Number(cqChat),
+              text: `🔗 *Відкритий трейд створено!*\n\nБудь-який гравець, який перейде за цим посиланням, стане твоїм партнером по обміну:\n\`${data.url}\``,
+              parse_mode: 'Markdown',
+              reply_markup: kb,
+            });
+          } else {
+            await sendDuelTg(TOKEN, 'sendMessage', { chat_id: Number(cqChat), text: '❌ Не вдалося створити відкритий трейд.' });
+          }
+          return res.status(200).json({ ok: true });
+        }
+
+        // Відхилити трейд
+        if (tAction === 'decline' && tArg) {
+          const host = req.headers.host || 'focaccia-bot.vercel.app';
+          await fetch(`https://${host}/api/trade`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'cancel', tradeId: tArg, userId: cqChat, reason: 'Відхилено користувачем' }),
+          });
+          await sendDuelTg(TOKEN, 'sendMessage', { chat_id: Number(cqChat), text: '❌ Трейд відхилено.' });
+          return res.status(200).json({ ok: true });
+        }
+
+        // Скасувати вибір
+        if (tAction === 'cancel') {
+          await sendDuelTg(TOKEN, 'sendMessage', { chat_id: Number(cqChat), text: '❌ Створення трейду скасовано.' });
+          return res.status(200).json({ ok: true });
+        }
+
+        return res.status(200).json({ ok: true });
+      } catch (e) {
+        console.error('Trade callback error:', tAction, e.message);
+        return res.status(200).json({ ok: true });
+      }
+    }
+
     // ===== 🎁 КОНКУРСИ: callback-кнопки =====
     if (cq && typeof cq.data === 'string' && (cq.data.startsWith('concurs:') || cq.data.startsWith('contest:'))) {
       const cqChat = cq.message?.chat?.id ?? cq.from.id;
@@ -4418,6 +4580,57 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: true });
     }
 
+    // 🤝 очікування вводу юзернейма для трейду
+    const tradeAwait = await redis('GET', `trade_await:${chatId}`);
+    if (tradeAwait?.result === 'trade') {
+      await redis('DEL', `trade_await:${chatId}`);
+      if (msg.message_id) {
+        scheduleMessageDeletion(chatId, msg.message_id, DUEL_MSG_CLEANUP_TTL).catch(() => {});
+      }
+      if (text.startsWith('/')) {
+        await sendDuelTg(TOKEN, 'sendMessage', { chat_id: Number(chatId), text: 'Ввід відмінено.' });
+        return res.status(200).json({ ok: true });
+      }
+      const target = await resolveTargetUser(text);
+      if (!target) {
+        await redis('SET', `trade_await:${chatId}`, 'trade', 'EX', 300);
+        await sendDuelTg(TOKEN, 'sendMessage', { chat_id: Number(chatId), text: `❌ Гравця ${text} не знайдено (вкажи @username або числовий ID). Спробуй ще раз:` });
+        return res.status(200).json({ ok: true });
+      }
+      const targetId = target.id;
+      if (String(targetId) === String(chatId)) {
+        await sendDuelTg(TOKEN, 'sendMessage', { chat_id: Number(chatId), text: '❌ Не можна трейдитися із самим собою' });
+        return res.status(200).json({ ok: true });
+      }
+
+      // Створюємо трейд
+      const host = req.headers.host || 'focaccia-bot.vercel.app';
+      const myName = (msg.from?.first_name || 'Гравець').slice(0, 24);
+      const myU = (msg.from?.username || '').slice(0, 32);
+
+      const tradeRes = await fetch(`https://${host}/api/trade`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'create', from: chatId, to: targetId, fromName: myName, fromU: myU }),
+      });
+      const tData = await tradeRes.json();
+      if (tData?.ok) {
+        const kb = {
+          inline_keyboard: [
+            [{ text: '🤝 Увійти в трейд', web_app: { url: tData.url } }],
+          ],
+        };
+        await sendDuelTg(TOKEN, 'sendMessage', {
+          chat_id: Number(chatId),
+          text: `🤝 Запрошення до трейду надіслано ${target.shortDisplay}!\nНатисни кнопку нижче, щоб відкрити кімнату обміну:`,
+          reply_markup: kb,
+        });
+      } else {
+        await sendDuelTg(TOKEN, 'sendMessage', { chat_id: Number(chatId), text: '❌ Не вдалося створити трейд. Спробуй пізніше.' });
+      }
+      return res.status(200).json({ ok: true });
+    }
+
     // 🎁 Очікування введення суми для конкурсу
     const contestAmtAwait = await redis('GET', `concurs_await_amount:${chatId}`);
     if (contestAmtAwait?.result && isAdmin(userId)) {
@@ -4530,6 +4743,26 @@ module.exports = async function handler(req, res) {
           inline_keyboard: [
             [{ text: '👥 Из списка игроков', callback_data: 'duel:players' }],
             [{ text: '✍️ По юзернейму', callback_data: 'duel:byname' }],
+          ],
+        },
+      });
+      return res.status(200).json({ ok: true });
+    }
+
+    // ===== /trade — меню трейдів =====
+    if (cmd === '/trade' || cmd === 'трейд' || cmd === 'трейди' || cmd === 'trade') {
+      if (msg.message_id) {
+        scheduleMessageDeletion(chatId, msg.message_id, DUEL_MSG_CLEANUP_TTL).catch(() => {});
+      }
+      await sendDuelTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: '🤝 *Меню безпечних Трейдів*\nОбмінюйся фокачами 🫓, алмазами 💎 та скінами 🎨 в окремому міні-аппі!',
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '👥 Зі списку гравців', callback_data: 'trade:players' }],
+            [{ text: '🔍 За юзернеймом', callback_data: 'trade:byname' }],
+            [{ text: '🔗 Створити відкритий трейд', callback_data: 'trade:open' }],
           ],
         },
       });

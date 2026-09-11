@@ -336,7 +336,19 @@ async function resolveUserId(input) {
     const patronData = await redis('HGET', `user_extra:${userId}`, 'badge_patron');
     const patronBadge = patronData?.result === '1';
 
-    if (amount > 0 || rebirths > 0 || diamonds > 0 || deduct > 0 || extraUpgrade || patronBadge || resetSkins) {
+    const rewardSkinsRaw = await redis('GET', `reward_skins:${userId}`);
+    let grantSkins = [];
+    if (rewardSkinsRaw?.result) {
+      try { grantSkins = JSON.parse(rewardSkinsRaw.result); } catch {}
+    }
+
+    const lostSkinsRaw = await redis('GET', `lost_skins:${userId}`);
+    let removeSkins = [];
+    if (lostSkinsRaw?.result) {
+      try { removeSkins = JSON.parse(lostSkinsRaw.result); } catch {}
+    }
+
+    if (amount > 0 || rebirths > 0 || diamonds > 0 || deduct > 0 || extraUpgrade || patronBadge || resetSkins || grantSkins.length > 0 || removeSkins.length > 0) {
       // Clear pending grants after claiming
       if (amount > 0) await redis('DEL', `reward:${userId}`);
       if (rebirths > 0) await redis('DEL', `rebirth:${userId}`);
@@ -347,6 +359,8 @@ async function resolveUserId(input) {
       if (deduct > 0) await redis('DEL', `deduct:${userId}`);
       if (extraUpgrade) await redis('HDEL', `user_extra:${userId}`, 'vip_upgrade');
       if (patronBadge) await redis('HDEL', `user_extra:${userId}`, 'badge_patron');
+      if (grantSkins.length > 0) await redis('DEL', `reward_skins:${userId}`);
+      if (removeSkins.length > 0) await redis('DEL', `lost_skins:${userId}`);
 
       return res.status(200).json({
         ok: true,
@@ -360,6 +374,8 @@ async function resolveUserId(input) {
         karma,
         resetSkins,
         skinsResetTime,
+        grantSkins,
+        removeSkins,
         maintenance: isMaintenance,
       });
     }
