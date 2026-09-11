@@ -273,6 +273,143 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: true, focaccia: f, diamonds: d });
     }
 
+    // --- список активних гравців для вибору суперника (GET або POST) ---
+    if ((req.method === 'GET' && req.query.action === 'get_active_players') || (req.method === 'POST' && req.body?.action === 'get_active_players')) {
+      const myId = String(req.query.userId || req.body?.userId || '');
+      const players = [];
+      const seenIds = new Set();
+      if (myId) seenIds.add(myId);
+
+      const lbRaw = await redis('HGETALL', 'leaderboard');
+      if (lbRaw?.result && Array.isArray(lbRaw.result)) {
+        for (let i = 0; i < lbRaw.result.length; i += 2) {
+          const id = String(lbRaw.result[i]);
+          if (seenIds.has(id)) continue;
+          try {
+            const d = JSON.parse(lbRaw.result[i + 1]);
+            seenIds.add(id);
+            players.push({
+              id,
+              name: d.n || d.name || 'Гравець',
+              username: d.u || d.username || '',
+              score: Number(d.t) || 0,
+            });
+          } catch {}
+        }
+      }
+
+      if (players.length < 20) {
+        const usersRaw = await redis('HGETALL', 'users');
+        if (usersRaw?.result && Array.isArray(usersRaw.result)) {
+          for (let i = 0; i < usersRaw.result.length; i += 2) {
+            const id = String(usersRaw.result[i]);
+            if (seenIds.has(id)) continue;
+            try {
+              const u = JSON.parse(usersRaw.result[i + 1]);
+              seenIds.add(id);
+              players.push({
+                id,
+                name: u.name || u.first_name || 'Гравець',
+                username: u.username || '',
+                score: 0,
+              });
+              if (players.length >= 25) break;
+            } catch {}
+          }
+        }
+      }
+
+      return res.status(200).json({ ok: true, players: players.slice(0, 25) });
+    }
+
+    // --- пошук гравця за @username або ID (GET або POST) ---
+    if ((req.method === 'GET' && req.query.action === 'find_player') || (req.method === 'POST' && req.body?.action === 'find_player')) {
+      const q = String(req.query.q || req.body?.q || '').trim();
+      if (!q) return res.status(400).json({ ok: false, error: 'empty_query' });
+      const cleanQ = q.replace(/^@/, '').toLowerCase();
+
+      // 1. Числовий ID
+      if (/^\d{5,20}$/.test(q)) {
+        const uData = await redis('HGET', 'users', q);
+        let name = 'Гравець';
+        let username = '';
+        if (uData?.result) {
+          try {
+            const parsed = JSON.parse(uData.result);
+            if (parsed.name || parsed.first_name) name = parsed.name || parsed.first_name;
+            if (parsed.username) username = parsed.username;
+          } catch {}
+        }
+        return res.status(200).json({ ok: true, player: { id: q, name, username } });
+      }
+
+      // 2. Хеш таблиця usernames
+      const mappedId = await redis('HGET', 'usernames', cleanQ);
+      if (mappedId?.result) {
+        const id = String(mappedId.result);
+        let name = cleanQ;
+        const uData = await redis('HGET', 'users', id);
+        if (uData?.result) {
+          try {
+            const parsed = JSON.parse(uData.result);
+            if (parsed.name || parsed.first_name) name = parsed.name || parsed.first_name;
+          } catch {}
+        }
+        return res.status(200).json({ ok: true, player: { id, name, username: cleanQ } });
+      }
+
+      // 3. Хеш users
+      const usersRaw = await redis('HGETALL', 'users');
+      if (usersRaw?.result && Array.isArray(usersRaw.result)) {
+        for (let i = 0; i < usersRaw.result.length; i += 2) {
+          const id = String(usersRaw.result[i]);
+          try {
+            const u = JSON.parse(usersRaw.result[i + 1]);
+            if (u.username && u.username.toLowerCase() === cleanQ) {
+              return res.status(200).json({ ok: true, player: { id, name: u.name || u.first_name || id, username: u.username } });
+            }
+          } catch {}
+        }
+      }
+
+      // 4. Хеш leaderboard
+      const lbRaw = await redis('HGETALL', 'leaderboard');
+      if (lbRaw?.result && Array.isArray(lbRaw.result)) {
+        for (let i = 0; i < lbRaw.result.length; i += 2) {
+          const id = String(lbRaw.result[i]);
+          try {
+            const lb = JSON.parse(lbRaw.result[i + 1]);
+            if (lb.u && lb.u.toLowerCase() === cleanQ) {
+              return res.status(200).json({ ok: true, player: { id, name: lb.n || id, username: lb.u } });
+            }
+          } catch {}
+        }
+      }
+
+      return res.status(200).json({ ok: false, error: 'not_found' });
+    }
+
+    // --- попередній перегляд відкритої дуелі для підключення (GET) ---
+    if (req.method === 'GET' && req.query.action === 'preview') {
+      const duelId = String(req.query.duelId || '');
+      const duel = await getDuel(duelId);
+      if (!duel) return res.status(200).json({ ok: false, error: 'not found' });
+      return res.status(200).json({
+        ok: true,
+        duel: {
+          id: duel.id,
+          stage: duel.stage,
+          isOpen: Boolean(duel.isOpen),
+          creator: duel.p1,
+          stakeCur: duel.stakeCur,
+          stake: duel.stake,
+          goal: duel.goal,
+          timeMs: duel.timeMs,
+          expiresAt: duel.expiresAt,
+        },
+      });
+    }
+
     // ===== POST — действия =====
     if (req.method === 'POST') {
       const body = req.body || {};
@@ -287,36 +424,50 @@ module.exports = async function handler(req, res) {
         return res.status(200).json({ ok: true, focaccia: f, diamonds: d });
       }
 
-      // --- создать вызов (со ставкой, целью и временем раунда) ---
+      // --- створити виклик (персональний або відкритий) ---
       if (action === 'challenge') {
         const from = String(body.from || '');
-        const to = String(body.to || '');
+        const to = String(body.to || '').trim();
+        const isOpen = !to || to === 'null' || to === 'open';
         const fromName = String(body.fromName || 'Гравець').replace(/\uFFFD/g, '').trim().slice(0, 24) || 'Гравець';
         const fromU = String(body.fromU || '').replace(/[^a-zA-Z0-9_]/g, '').slice(0, 32);
-        if (!/^\d{1,20}$/.test(from) || !/^\d{1,20}$/.test(to) || from === to) {
-          return res.status(400).json({ ok: false, error: 'invalid players' });
+
+        if (!/^\d{1,20}$/.test(from)) {
+          return res.status(400).json({ ok: false, error: 'invalid creator' });
         }
-        const stakeCur = body.stakeCur === 'gem' ? 'gem' : 'foc';
-        const stake = Math.max(1, Math.min(Math.floor(Number(body.stake)) || 0, 1e21));
-        const goal = Math.max(GOAL_MIN, Math.min(Math.floor(Number(body.goal)) || GOAL_DEFAULT, GOAL_MAX));
-        const timeMs = Math.max(60000, Math.min(Math.floor(Number(body.timeMs)) || 180000, DUEL_LIMIT));
-        const kFrom = await getKarma(from);
-        const kTo = await getKarma(to);
-        if (kFrom < KARMA_MIN || kTo < KARMA_MIN) {
-          return res.status(200).json({ ok: false, error: 'shadow', karma: Math.min(kFrom, kTo) });
+        if (!isOpen && (!/^\d{1,20}$/.test(to) || from === to)) {
+          return res.status(400).json({ ok: false, error: 'invalid opponent' });
         }
 
-        // Валідація балансу обох гравців перед створенням виклику
+        const stakeCur = body.stakeCur === 'gem' ? 'gem' : 'foc';
+        const stake = Math.max(0, Math.min(Math.floor(Number(body.stake)) || 0, 1e21));
+        const goal = Math.max(GOAL_MIN, Math.min(Math.floor(Number(body.goal)) || GOAL_DEFAULT, GOAL_MAX));
+        const timeMs = Math.max(60000, Math.min(Math.floor(Number(body.timeMs)) || 180000, DUEL_LIMIT));
+
+        const kFrom = await getKarma(from);
+        if (kFrom < KARMA_MIN) {
+          return res.status(200).json({ ok: false, error: 'shadow', karma: kFrom });
+        }
+
+        if (!isOpen) {
+          const kTo = await getKarma(to);
+          if (kTo < KARMA_MIN) {
+            return res.status(200).json({ ok: false, error: 'shadow', karma: kTo });
+          }
+        }
+
+        // Валідація балансу творця
         if (stake > 0) {
           const fromBal = await getUserBalance(from, stakeCur);
           if (fromBal !== null && fromBal < stake) {
             return res.status(200).json({ ok: false, error: 'no_funds_creator' });
           }
 
-          const toBal = await getUserBalance(to, stakeCur);
-          // Блокуємо тільки якщо баланс суперника ТОЧНО відомий і менший за ставку
-          if (toBal !== null && toBal < stake) {
-            return res.status(200).json({ ok: false, error: 'no_funds_opponent' });
+          if (!isOpen) {
+            const toBal = await getUserBalance(to, stakeCur);
+            if (toBal !== null && toBal < stake) {
+              return res.status(200).json({ ok: false, error: 'no_funds_opponent' });
+            }
           }
         }
 
@@ -324,24 +475,92 @@ module.exports = async function handler(req, res) {
         const duel = {
           id: duelId,
           stage: 'challenge',
+          isOpen,
           p1: { id: from, name: fromName, u: fromU },
-          p2: { id: to, name: '', u: '' },
+          p2: { id: isOpen ? '' : to, name: '', u: '' },
           stakeCur, stake, goal, timeMs,
           createdAt: now, expiresAt: now + DUEL_TTL,
         };
         await saveDuel(duel);
+
         const sym = stakeCur === 'gem' ? '💎' : '🫓';
-        await sendDuelTg(to, `⚔️ Тебя вызвали на дуэль! (${fromName})\n💰 Ставка: ${stake.toLocaleString('ru')} ${sym}\n🎯 Цель: ${goal.toLocaleString('ru')} тапов\n⏱ Раунд: ${Math.round(timeMs / 60000)} мин\n\nУ тебя спишут ставку сразу после старта. 5 минут на ответ.`, {
-          reply_markup: {
-            inline_keyboard: [
-              [
-                { text: '⚔️ Начать', callback_data: `duel:accept:${duelId}` },
-                { text: '❌ Отказ', callback_data: `duel:decline:${duelId}` },
+        const webAppUrl = `${DUEL_SITE}${duelId}`;
+
+        if (!isOpen) {
+          await sendDuelTg(to, `⚔️ ${fromName} кинув тобі виклик на дуель!\n💰 Ставка: ${stake.toLocaleString('ru')} ${sym}\n🎯 Ціль: ${goal.toLocaleString('ru')} тапів\n⏱ Раунд: ${Math.round(timeMs / 60000)} хв\n\nУ тебе спишуть ставку одразу після старту бою. 5 хвилин на відповідь.`, {
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  { text: '⚔️ Прийняти виклик', web_app: { url: webAppUrl } },
+                  { text: '❌ Відхилити', callback_data: `duel:decline:${duelId}` },
+                ],
               ],
-            ],
+            },
+          });
+        }
+
+        return res.status(200).json({ ok: true, duelId, url: webAppUrl, isOpen });
+      }
+
+      // --- приєднатися до відкритої дуелі ---
+      if (action === 'join_open') {
+        const duelId = String(body.duelId || '');
+        const userId = String(body.userId || '');
+        const name = String(body.name || 'Гравець').replace(/\uFFFD/g, '').trim().slice(0, 24) || 'Гравець';
+        const u = String(body.u || '').replace(/[^a-zA-Z0-9_]/g, '').slice(0, 32);
+
+        if (!duelId || !userId || !/^\d{1,20}$/.test(userId)) {
+          return res.status(400).json({ ok: false, error: 'invalid params' });
+        }
+        const duel = await getDuel(duelId);
+        if (!duel) return res.status(200).json({ ok: false, error: 'not found' });
+        if (duel.stage !== 'challenge') return res.status(200).json({ ok: false, error: 'not available' });
+        if (duel.p1.id === userId) return res.status(200).json({ ok: false, error: 'cannot join own duel' });
+        if (duel.p2.id && duel.p2.id !== userId) return res.status(200).json({ ok: false, error: 'already full' });
+
+        const k = await getKarma(userId);
+        if (k < KARMA_MIN) return res.status(200).json({ ok: false, error: 'shadow', karma: k });
+
+        if (duel.stake > 0) {
+          const bal = await getUserBalance(userId, duel.stakeCur);
+          if (bal !== null && bal < duel.stake) {
+            return res.status(200).json({ ok: false, error: 'no_funds' });
+          }
+        }
+
+        duel.p2 = { id: userId, name, u };
+        duel.stage = 'accepted';
+        duel.acceptedAt = now;
+        await saveDuel(duel);
+
+        const sym = duel.stakeCur === 'gem' ? '💎' : '🫓';
+        const webAppUrl = `${DUEL_SITE}${duelId}`;
+        await sendDuelTg(duel.p1.id, `⚔️ ${name} приєднався до твоєї дуелі!\n💰 Банк: ${(duel.stake * 2).toLocaleString('ru')} ${sym}\nПереходь у бій!`, {
+          reply_markup: {
+            inline_keyboard: [[{ text: '🎮 Увійти в дуель', web_app: { url: webAppUrl } }]],
           },
         });
-        return res.status(200).json({ ok: true, duelId });
+
+        return res.status(200).json({ ok: true, duelId, stage: 'accepted', url: webAppUrl });
+      }
+
+      // --- скасувати виклик/кімнату творцем ---
+      if (action === 'cancel') {
+        const duelId = String(body.duelId || '');
+        const userId = String(body.userId || '');
+        if (!duelId || !userId) return res.status(400).json({ ok: false, error: 'invalid params' });
+        const duel = await getDuel(duelId);
+        if (!duel) return res.status(200).json({ ok: false, error: 'not found' });
+        if (duel.p1.id !== userId) return res.status(200).json({ ok: false, error: 'not creator' });
+        if (duel.stage !== 'challenge') return res.status(200).json({ ok: false, error: 'already started' });
+
+        duel.stage = 'cancelled';
+        duel.reason = 'creator_cancelled';
+        await saveDuel(duel);
+        if (duel.p2?.id) {
+          await sendDuelTg(duel.p2.id, `❌ ${duel.p1.name || 'Суперник'} скасував виклик на дуель.`);
+        }
+        return res.status(200).json({ ok: true, stage: 'cancelled' });
       }
 
       const duelId = String(body.duelId || '');

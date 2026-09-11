@@ -3184,18 +3184,21 @@ module.exports = async function handler(req, res) {
       }
 
       try {
-        // меню выбора соперника
+        // меню відкриття дуелей у міні-аппі
         if (dAction === 'menu') {
-        await sendDuelTg(TOKEN, 'sendMessage', { chat_id: Number(cqChat), text: '⚔️ Кого хочешь вызвать на дуэль?\nКто быстрее накликает 100 фокач — тот победил (+5💎)!',
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: '👥 Из списка игроков', callback_data: 'duel:players' }],
-              [{ text: '✍️ По юзернейму', callback_data: 'duel:byname' }],
-            ],
-          },
-        });
-        return res.status(200).json({ ok: true });
-      }
+          const duelLobbyUrl = 'https://nout0688-cloud.github.io/focaccia-clicker/?v=1.4.0&duel=lobby';
+          await sendDuelTg(TOKEN, 'sendMessage', {
+            chat_id: Number(cqChat),
+            text: '⚔️ *Дуелі Фокача Клікер (Mini App)*\n\nБийся 1 на 1 у реальному часі на фокачі 🫓 або алмази 💎!\nОбирай суперника, валюту, ставку, ціль та тривалість бою прямо в окремому міні-аппі.',
+            parse_mode: 'Markdown',
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '⚔️ Відкрити Дуелі (Mini App)', web_app: { url: duelLobbyUrl } }],
+              ],
+            },
+          });
+          return res.status(200).json({ ok: true });
+        }
 
       // список игроков (последние активные, без себя)
       if (dAction === 'players') {
@@ -4736,13 +4739,14 @@ module.exports = async function handler(req, res) {
       if (msg.message_id) {
         scheduleMessageDeletion(chatId, msg.message_id, DUEL_MSG_CLEANUP_TTL).catch(() => {});
       }
+      const duelLobbyUrl = 'https://nout0688-cloud.github.io/focaccia-clicker/?v=1.4.0&duel=lobby';
       await sendDuelTg(TOKEN, 'sendMessage', {
         chat_id: chatId,
-        text: '⚔️ Кого хочешь вызвать на дуэль?\nКто быстрее накликает 100 фокач — тот победил (+5💎)!',
+        text: '⚔️ *Дуелі Фокача Клікер (Mini App)*\n\nБийся 1 на 1 у реальному часі на фокачі 🫓 або алмази 💎!\nОбирай суперника, валюту, ставку, ціль та час раунду прямо в окремому міні-аппі.',
+        parse_mode: 'Markdown',
         reply_markup: {
           inline_keyboard: [
-            [{ text: '👥 Из списка игроков', callback_data: 'duel:players' }],
-            [{ text: '✍️ По юзернейму', callback_data: 'duel:byname' }],
+            [{ text: '⚔️ Відкрити Дуелі (Mini App)', web_app: { url: duelLobbyUrl } }],
           ],
         },
       });
