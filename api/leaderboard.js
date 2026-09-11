@@ -237,11 +237,27 @@ module.exports = async function handler(req, res) {
         if (dClicks > 0) {
           const ratePerMin = dClicks / dMin;
           const ratePerSec = dClicks / dSec;
-          // Фізична межа людини:
-          // 1) Стабільно більше 650 кл/хв (10.8 CPS) протягом 10+ секунд
-          // 2) Загальна кількість кліків перевищує фізичний максимум (14 CPS) за час відсутності
-          const maxAllowedClicks = Math.max(100, Math.floor(dSec * 14));
-          const isCheatedRate = (dSec >= 10 && ratePerMin > 650) || (dClicks > maxAllowedClicks);
+          // Фізична межа людини (з урахуванням 2-3 пальців під час Боса та Золотого безумства x7):
+          // - Короткий сплеск (<30с): людина двома пальцями може тапати до 22 CPS
+          // - Середній інтервал (30-120с): до 18 CPS
+          // - Довгий інтервал (>120с): до 15 CPS
+          // Автоклікери видають стабільно > 22 CPS тривалий час або спамлять тисячі кліків миттєво
+          let maxAllowedClicks = 150;
+          if (dSec < 30) {
+            maxAllowedClicks = Math.max(150, Math.floor(dSec * 22) + 50);
+          } else if (dSec < 120) {
+            maxAllowedClicks = Math.floor(30 * 22 + (dSec - 30) * 18) + 50;
+          } else {
+            maxAllowedClicks = Math.floor(30 * 22 + 90 * 18 + (dSec - 120) * 15) + 80;
+          }
+
+          // Прапор чітерства:
+          // 1) Стабільно більше 1300 кл/хв (21.6 CPS) протягом 15+ секунд
+          // 2) Або перевищення максимальної кількості кліків maxAllowedClicks
+          // 3) Або сплеск > 28 CPS при dSec >= 5c
+          const isCheatedRate = (dSec >= 15 && ratePerMin > 1300) ||
+                                (dClicks > maxAllowedClicks) ||
+                                (dSec >= 5 && ratePerSec > 28);
 
           if (isCheatedRate) {
             cheated = true;
@@ -262,7 +278,7 @@ module.exports = async function handler(req, res) {
             if (logsRaw?.result) { try { logs = JSON.parse(logsRaw.result); } catch {} }
             logs.push({
               type: 'server_auto_click_detected',
-              reason: `Автоклікер виявлено (${Math.round(ratePerMin)} кл/хв, дельта: ${dClicks} за ${Math.round(dSec)}с)`,
+              reason: `Автоклікер виявлено (${Math.round(ratePerMin)} кл/хв, дельта: ${dClicks} за ${Math.round(dSec)}с, ${ratePerSec.toFixed(1)} CPS)`,
               dClicks,
               dSec: Math.round(dSec),
               ratePerSec: ratePerSec.toFixed(1),
