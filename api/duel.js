@@ -26,10 +26,9 @@ const PAUSE_MS = 30 * 1000;         // выход соперника → пау�
 const DUEL_LIMIT = 15 * 60 * 1000;  // максимальная длительность
 const DUEL_TTL = 5 * 60 * 1000;     // время на ответ на вызов
 const ACCEPT_TTL = 5 * 60 * 1000;   // время войти в мини-апп
-const FRESH_MS = 30 * 24 * 3600 * 1000;
 const KARMA_MIN = 25;               // ниже — «Тінь бабусі», дуэли закрыты
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const DUEL_SITE = 'https://nout0688-cloud.github.io/focaccia-clicker/?v=1.4.0&duel=';
+const DUEL_SITE = 'https://nout0688-cloud.github.io/focaccia-clicker/?v=';
 
 async function redis(...args) {
   const url = process.env.KV_REST_API_URL;
@@ -471,20 +470,22 @@ module.exports = async function handler(req, res) {
           }
         }
 
+        const toName = String(body.toName || '').replace(/\uFFFD/g, '').trim().slice(0, 24);
+        const toU = String(body.toU || '').replace(/[^a-zA-Z0-9_]/g, '').slice(0, 32);
         const duelId = `d${now.toString(36)}${Math.floor(Math.random() * 1296).toString(36)}`;
         const duel = {
           id: duelId,
           stage: 'challenge',
           isOpen,
           p1: { id: from, name: fromName, u: fromU },
-          p2: { id: isOpen ? '' : to, name: '', u: '' },
+          p2: { id: isOpen ? '' : to, name: toName, u: toU },
           stakeCur, stake, goal, timeMs,
           createdAt: now, expiresAt: now + DUEL_TTL,
         };
         await saveDuel(duel);
 
         const sym = stakeCur === 'gem' ? '💎' : '🫓';
-        const webAppUrl = `${DUEL_SITE}${duelId}`;
+        const webAppUrl = `${DUEL_SITE}${Date.now()}&duel=${duelId}`;
 
         if (!isOpen) {
           await sendDuelTg(to, `⚔️ ${fromName} кинув тобі виклик на дуель!\n💰 Ставка: ${stake.toLocaleString('ru')} ${sym}\n🎯 Ціль: ${goal.toLocaleString('ru')} тапів\n⏱ Раунд: ${Math.round(timeMs / 60000)} хв\n\nУ тебе спишуть ставку одразу після старту бою. 5 хвилин на відповідь.`, {
@@ -534,7 +535,7 @@ module.exports = async function handler(req, res) {
         await saveDuel(duel);
 
         const sym = duel.stakeCur === 'gem' ? '💎' : '🫓';
-        const webAppUrl = `${DUEL_SITE}${duelId}`;
+        const webAppUrl = `${DUEL_SITE}${Date.now()}&duel=${duelId}`;
         await sendDuelTg(duel.p1.id, `⚔️ ${name} приєднався до твоєї дуелі!\n💰 Банк: ${(duel.stake * 2).toLocaleString('ru')} ${sym}\nПереходь у бій!`, {
           reply_markup: {
             inline_keyboard: [[{ text: '🎮 Увійти в дуель', web_app: { url: webAppUrl } }]],
@@ -570,8 +571,8 @@ module.exports = async function handler(req, res) {
       }
       const duel = await getDuel(duelId);
       if (!duel) return res.status(200).json({ ok: false, error: 'not found' });
-      const isP1 = duel.p1.id === userId;
-      const isP2 = duel.p2.id === userId;
+      const isP1 = String(duel.p1.id) === userId;
+      const isP2 = String(duel.p2?.id || '') === userId;
       if (!isP1 && !isP2) return res.status(200).json({ ok: false, error: 'not a player' });
       const me = isP1 ? duel.p1 : duel.p2;
       const opp = isP1 ? duel.p2 : duel.p1;
@@ -591,7 +592,7 @@ module.exports = async function handler(req, res) {
         duel.stage = 'accepted';
         duel.acceptedAt = now;
         await saveDuel(duel);
-        const url = `${DUEL_SITE}${duelId}`;
+        const url = `${DUEL_SITE}${Date.now()}&duel=${duelId}`;
         const sym = duel.stakeCur === 'gem' ? '💎' : '🫓';
         const kb = { inline_keyboard: [[{ text: '🎮 Войти в дуэль', web_app: { url } }]] };
         await sendDuelTg(duel.p1.id, `⚔️ ${me.name} принял вызов!\n💰 Банк: ${(duel.stake * 2).toLocaleString('ru')} ${sym}`, { reply_markup: kb });
@@ -664,14 +665,38 @@ module.exports = async function handler(req, res) {
 
     const duel = await getDuel(duelId);
     if (!duel) return res.status(200).json({ ok: false, error: 'not found', v: 'v5.1.1' });
-    const isP1 = duel.p1.id === userId;
-    const isP2 = duel.p2.id === userId;
-    if (!isP1 && !isP2) return res.status(200).json({ ok: false, error: 'not a player' });
+    const isP1 = String(duel.p1.id) === userId;
+    const isP2 = String(duel.p2?.id || '') === userId;
+    if (!isP1 && !isP2) return res.status(200).json({ ok: false, error: 'not a player', isOpen: Boolean(duel.isOpen) });
     const me = isP1 ? duel.p1 : duel.p2;
     const opp = isP1 ? duel.p2 : duel.p1;
 
     // присутствие — атомарно
     await redis('HSET', `duel_seen:${duelId}`, userId, String(now));
+
+    // Якщо це виклик гравцю 2 і гравець 2 увійшов у синхронізацію — автоматично оновлюємо дані та переводимо в accepted
+    if (isP2) {
+      if (q.name && (!duel.p2.name || duel.p2.name === 'Гравець' || duel.p2.name === 'Суперник')) {
+        duel.p2.name = String(q.name).replace(/\uFFFD/g, '').trim().slice(0, 24) || duel.p2.name || 'Гравець';
+      }
+      if (q.u && !duel.p2.u) {
+        duel.p2.u = String(q.u).replace(/[^a-zA-Z0-9_]/g, '').slice(0, 32);
+      }
+      if (duel.stage === 'challenge') {
+        duel.stage = 'accepted';
+        duel.acceptedAt = now;
+        await saveDuel(duel);
+      }
+    }
+
+    if (isP1) {
+      if (q.name && (!duel.p1.name || duel.p1.name === 'Гравець')) {
+        duel.p1.name = String(q.name).replace(/\uFFFD/g, '').trim().slice(0, 24) || duel.p1.name || 'Гравець';
+      }
+      if (q.u && !duel.p1.u) {
+        duel.p1.u = String(q.u).replace(/[^a-zA-Z0-9_]/g, '').slice(0, 32);
+      }
+    }
 
     // истёкший вызов
     if (duel.stage === 'challenge' && now > duel.expiresAt) {
@@ -682,19 +707,26 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: false, error: 'expired', stage: 'cancelled' });
     }
 
-    // вход игрока в мини-апп: оба внутри → отсчёт
-    if (duel.stage === 'accepted') {
-      const seen1 = await redis('HGET', `duel_seen:${duelId}`, duel.p1.id);
-      const seen2 = await redis('HGET', `duel_seen:${duelId}`, duel.p2.id);
-      if (seen1?.result && seen2?.result) {
+    // вход обоих игроков в мини-апп: оба внутри и пингуют (< 20с) → запускаем отсчёт
+    if (duel.stage === 'accepted' || (duel.stage === 'challenge' && duel.p2?.id && !duel.isOpen)) {
+      const seen1Raw = await redis('HGET', `duel_seen:${duelId}`, String(duel.p1.id));
+      const seen2Raw = await redis('HGET', `duel_seen:${duelId}`, String(duel.p2.id));
+      const seen1Ts = seen1Raw?.result ? parseInt(seen1Raw.result, 10) : 0;
+      const seen2Ts = seen2Raw?.result ? parseInt(seen2Raw.result, 10) : 0;
+      const isSeen1Recent = seen1Ts > 0 && (now - seen1Ts) < 20000;
+      const isSeen2Recent = seen2Ts > 0 && (now - seen2Ts) < 20000;
+
+      if (isSeen1Recent && isSeen2Recent) {
         duel.stage = 'countdown';
         duel.startTs = now + 7000; // 4с интро VS + 3с отсчёт
         await saveDuel(duel);
-      } else if (duel.acceptedAt && now - duel.acceptedAt > ACCEPT_TTL) {
+      } else if (duel.acceptedAt && (now - duel.acceptedAt) > ACCEPT_TTL) {
         // соперник так и не вошёл — техническое поражение
-        const joinedId = seen1?.result ? duel.p1.id : duel.p2.id;
-        const fin = await finishDuel(duel, joinedId, 'forfeit');
-        return res.status(200).json({ ok: true, stage: 'finished', winner: fin?.winner, reason: 'forfeit' });
+        const joinedId = isSeen1Recent ? duel.p1.id : (isSeen2Recent ? duel.p2.id : null);
+        if (joinedId) {
+          const fin = await finishDuel(duel, joinedId, 'forfeit');
+          return res.status(200).json({ ok: true, stage: 'finished', winner: fin?.winner, reason: 'forfeit' });
+        }
       }
     }
 
@@ -805,6 +837,9 @@ module.exports = async function handler(req, res) {
     return res.status(200).json({
       ok: true, v: 'v5.1.1',
       stage: duel.stage,
+      isOpen: Boolean(duel.isOpen),
+      creatorId: String(duel.p1.id),
+      isCreator: String(duel.p1.id) === userId,
       me: { id: me.id, name: me.name, u: me.u || '', score: myScore },
       opp: { id: opp.id, name: opp.name, u: opp.u || '', score: oppScore, missing: oppMissing },
       goal: duel.goal || GOAL_DEFAULT,

@@ -4731,7 +4731,7 @@ module.exports = async function handler(req, res) {
       // Deep link to Duel: /start duel_... or /start d_...
       if (startParam.startsWith('duel_') || startParam.startsWith('d_') || startParam === 'duel') {
         const duelId = (startParam === 'duel' || startParam === 'duel_lobby') ? 'lobby' : startParam.replace(/^duel_/, '');
-        const duelUrl = `https://nout0688-cloud.github.io/focaccia-clicker/?v=1.4.0&duel=${duelId}`;
+        const duelUrl = `https://nout0688-cloud.github.io/focaccia-clicker/?v=${Date.now()}&duel=${duelId}`;
         await sendTg(TOKEN, 'sendMessage', {
           chat_id: chatId,
           text: `⚔️ *Виклик на дуель 1 на 1!*\n\nТебе викликали на бій у Фокача Клікері!\nНатисни кнопку нижче, щоб прийняти виклик:`,
