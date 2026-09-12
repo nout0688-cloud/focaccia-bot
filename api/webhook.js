@@ -5842,6 +5842,193 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: true });
     }
 
+    // /snapshots <username|ID> — view account backup snapshots
+    if (cmd.startsWith('/snapshots') || cmd.startsWith('snapshots') || cmd.startsWith('/snaps') || cmd.startsWith('snaps')) {
+      const targetArg = text.replace(/^\/?(snapshots|snaps)\s*/i, '').trim();
+      if (!targetArg) {
+        await sendTg(TOKEN, 'sendMessage', {
+          chat_id: chatId,
+          text: `ℹ️ Вкажіть користувача:\n\`/snapshots @username\` або \`/snapshots ID\``,
+          parse_mode: 'Markdown',
+        });
+        return res.status(200).json({ ok: true });
+      }
+
+      const target = await resolveTargetUser(targetArg);
+      if (!target) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: `❌ Користувача ${targetArg} не знайдено` });
+        return res.status(200).json({ ok: true });
+      }
+
+      const targetId = target.id;
+      const latestMetaRaw = await redis('GET', `user_latest_snapshot_meta:${targetId}`);
+      let latest = null;
+      if (latestMetaRaw?.result) {
+        try { latest = JSON.parse(latestMetaRaw.result); } catch {}
+      }
+
+      const histRaw = await redis('GET', `user_snapshot_history:${targetId}`);
+      let history = [];
+      if (histRaw?.result) {
+        try { history = JSON.parse(histRaw.result); } catch {}
+      }
+
+      const lbRaw = await redis('HGET', 'leaderboard', targetId);
+      let lb = null;
+      if (lbRaw?.result) {
+        try { lb = JSON.parse(lbRaw.result); } catch {}
+      }
+
+      let textMsg = `📸 *СНАПШОТИ ТА БЕКАПИ: ${target.display}*\n\n`;
+
+      if (lb) {
+        textMsg += `🏆 *Пікові рекорди в лідерборді:*\n` +
+          `• Фокач (total): \`${Number(lb.t || 0).toLocaleString()}\`\n` +
+          `• Ребіртхи: \`${lb.p || 0}\` | Алмази: \`${lb.d || 0} 💎\` | Кліки: \`${lb.k || 0}\`\n\n`;
+      }
+
+      if (!latest && history.length === 0) {
+        textMsg += `⚠️ Повних серверних снапшотів ще немає (вони зберігаються автоматично під час активної гри).\n\n` +
+          `👉 Але ви можете відновити пікові рекорди командою:\n\`/restore ${target.shortDisplay} peak\``;
+      } else {
+        if (latest) {
+          const dt = new Date(latest.ts).toLocaleString('uk-UA', { timeZone: 'Europe/Kyiv' });
+          textMsg += `🔹 *Останній автоснапшот [latest]:*\n` +
+            `• Час: ${dt}\n` +
+            `• Фокач: \`${Number(latest.focaccia || 0).toLocaleString()}\` (всього: \`${Number(latest.total || 0).toLocaleString()}\`)\n` +
+            `• Ребіртхи: \`${latest.prestige || 0}\` | Алмази: \`${latest.diamonds || 0} 💎\`\n` +
+            `• Будівель: \`${latest.buildingsCount || 0}\` | Апгрейдів: \`${latest.upgradesCount || 0}\`\n\n`;
+        }
+
+        if (history.length > 0) {
+          textMsg += `📜 *Історія снапшотів (останні ${history.length}):*\n`;
+          history.forEach((h, idx) => {
+            const hDt = new Date(h.ts).toLocaleString('uk-UA', { timeZone: 'Europe/Kyiv' });
+            textMsg += `\`[${idx + 1}]\` ${hDt} — 🔄 ${h.prestige || 0} | 💎 ${h.diamonds || 0} | 🫓 ${Number(h.total || 0).toLocaleString()}\n`;
+          });
+          textMsg += `\n`;
+        }
+
+        textMsg += `👉 *Щоб відновити акаунт з потрібного снапшота, відправте:*\n` +
+          `\`/restore ${target.shortDisplay} latest\` — з найновішого\n` +
+          `\`/restore ${target.shortDisplay} 1\` — за номером з історії\n` +
+          `\`/restore ${target.shortDisplay} peak\` — за рекордом лідерборду`;
+      }
+
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: textMsg,
+        parse_mode: 'Markdown',
+      });
+      return res.status(200).json({ ok: true });
+    }
+
+    // /restore <username|ID> [latest|1..5|peak] — restore account from snapshot
+    if (cmd.startsWith('/restore') || cmd.startsWith('restore')) {
+      const parts = text.trim().split(/\s+/);
+      const targetArg = parts[1] || '';
+      const snapArg = parts[2] || 'latest';
+
+      if (!targetArg) {
+        await sendTg(TOKEN, 'sendMessage', {
+          chat_id: chatId,
+          text: `ℹ️ Формат команди:\n\`/restore @username [latest|номер|peak]\`\n\nПриклад: \`/restore @player latest\``,
+          parse_mode: 'Markdown',
+        });
+        return res.status(200).json({ ok: true });
+      }
+
+      const target = await resolveTargetUser(targetArg);
+      if (!target) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: `❌ Користувача ${targetArg} не знайдено` });
+        return res.status(200).json({ ok: true });
+      }
+
+      const targetId = target.id;
+      let restoreData = null;
+      let restoreTypeDesc = '';
+
+      if (snapArg.toLowerCase() === 'peak') {
+        const lbRaw = await redis('HGET', 'leaderboard', targetId);
+        if (lbRaw?.result) {
+          try {
+            const lb = JSON.parse(lbRaw.result);
+            restoreData = {
+              type: 'leaderboard',
+              total: Number(lb.t) || 0,
+              focaccia: Number(lb.t) || 0,
+              prestige: Number(lb.p) || 0,
+              diamonds: Number(lb.d) || 0,
+              clicks: Number(lb.k) || 0,
+              bossesDefeated: Number(lb.b) || 0,
+              ts: Date.now(),
+            };
+            restoreTypeDesc = `пікові рекорди з лідерборду (🫓 ${restoreData.total.toLocaleString()}, 🔄 ${restoreData.prestige}, 💎 ${restoreData.diamonds})`;
+          } catch {}
+        }
+      } else {
+        let snapPayload = null;
+        if (/^\d+$/.test(snapArg)) {
+          const idx = parseInt(snapArg, 10) - 1;
+          const histRaw = await redis('GET', `user_snapshot_history:${targetId}`);
+          if (histRaw?.result) {
+            try {
+              const hist = JSON.parse(histRaw.result);
+              if (Array.isArray(hist) && hist[idx]) {
+                const sId = hist[idx].id;
+                const snapRes = await redis('GET', `user_snapshot:${targetId}:${sId}`);
+                if (snapRes?.result) snapPayload = snapRes.result;
+              }
+            } catch {}
+          }
+        }
+        if (!snapPayload) {
+          const latestSnap = await redis('GET', `user_latest_snapshot:${targetId}`);
+          if (latestSnap?.result) snapPayload = latestSnap.result;
+        }
+
+        if (snapPayload) {
+          try {
+            const parsed = JSON.parse(snapPayload);
+            restoreData = {
+              type: 'full_save',
+              save: parsed,
+              ts: Date.now(),
+            };
+            restoreTypeDesc = `повний снапшот (🫓 ${Number(parsed.total || 0).toLocaleString()}, 🔄 ${parsed.prestige || 0}, 💎 ${parsed.diamonds || 0})`;
+          } catch {}
+        }
+      }
+
+      if (!restoreData) {
+        await sendTg(TOKEN, 'sendMessage', {
+          chat_id: chatId,
+          text: `❌ Не вдалося знайти снапшот або запис у лідерборді для відновлення користувача ${target.display}. Спочатку перевірте: \`/snapshots ${target.shortDisplay}\``,
+        });
+        return res.status(200).json({ ok: true });
+      }
+
+      // Remove any lingering reset flags and set restore payload
+      await redis('DEL', `reset:${targetId}`);
+      await redis('SET', `reward_restore:${targetId}`, JSON.stringify(restoreData));
+
+      // Notify target user
+      try {
+        await sendTg(TOKEN, 'sendMessage', {
+          chat_id: Number(targetId),
+          text: `🎉 *Твій акаунт відновлено адміністратором!*\n\nВідновлено: ${restoreTypeDesc}.\nПри наступному відкритті гри весь твій прогрес буде автоматично синхронізовано!`,
+          parse_mode: 'Markdown',
+        });
+      } catch {}
+
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: `✅ *АКАУНТ ${target.display} ВІДНОВЛЕНО!*\n\nДані: ${restoreTypeDesc}.\nГравцю відправлено сповіщення. При наступному вході гра підтягне ці дані.`,
+        parse_mode: 'Markdown',
+      });
+      return res.status(200).json({ ok: true });
+    }
+
     // /reset_all — request all users reset
     if (cmd === '/reset_all' || cmd === 'reset_all') {
       const usersData = await redis('HGETALL', 'users');

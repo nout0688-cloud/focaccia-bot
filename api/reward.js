@@ -57,6 +57,162 @@ module.exports = async function handler(req, res) {
     return res.status(200).json({ ok: true, maintenance: isM });
   }
 
+  // ===== 💾 ACTION: SAVE ACCOUNT SNAPSHOT =====
+  if (action === 'save_snapshot') {
+    const uid = String(body.userId || req.query.userId || '').trim();
+    if (!uid || !/^\d+$/.test(uid) || parseInt(uid, 10) <= 0) {
+      return res.status(400).json({ ok: false, error: 'invalid_user_id' });
+    }
+    const saveState = body.saveState || body.snapshot;
+    if (!saveState || typeof saveState !== 'object') {
+      return res.status(400).json({ ok: false, error: 'missing_save_state' });
+    }
+
+    try {
+      const now = Date.now();
+      const total = Number(saveState.total) || 0;
+      const prestige = Number(saveState.prestige) || 0;
+      const diamonds = Number(saveState.diamonds) || 0;
+      const clicks = Number(saveState.clicks) || 0;
+      const focaccia = Number(saveState.focaccia) || 0;
+      const buildingsCount = Object.values(saveState.buildings || {}).reduce((a, b) => a + (Number(b) || 0), 0);
+      const upgradesCount = Array.isArray(saveState.upgrades) ? saveState.upgrades.length : 0;
+
+      const meta = {
+        ts: now,
+        id: `snap_${now}`,
+        total,
+        focaccia,
+        prestige,
+        diamonds,
+        clicks,
+        buildingsCount,
+        upgradesCount,
+      };
+
+      const cleanSave = { ...saveState };
+      delete cleanSave.photo;
+      delete cleanSave.offlineEvents;
+
+      const payload = JSON.stringify(cleanSave);
+
+      // Save latest snapshot
+      await redis('SET', `user_latest_snapshot:${uid}`, payload);
+      await redis('SET', `user_latest_snapshot_meta:${uid}`, JSON.stringify(meta));
+
+      // Append to history (keep up to 5 snapshots)
+      let history = [];
+      const histRaw = await redis('GET', `user_snapshot_history:${uid}`);
+      if (histRaw?.result) {
+        try { history = JSON.parse(histRaw.result); } catch {}
+      }
+      if (!Array.isArray(history)) history = [];
+
+      const lastHist = history[0];
+      const shouldAddToHistory = !lastHist || (now - lastHist.ts >= 120000) || (prestige > (lastHist.prestige || 0));
+
+      if (shouldAddToHistory) {
+        history.unshift(meta);
+        if (history.length > 5) {
+          const removed = history.slice(5);
+          history = history.slice(0, 5);
+          for (const rem of removed) {
+            await redis('DEL', `user_snapshot:${uid}:${rem.id}`);
+          }
+        }
+        await redis('SET', `user_snapshot_history:${uid}`, JSON.stringify(history));
+        await redis('SET', `user_snapshot:${uid}:${meta.id}`, payload);
+      }
+
+      return res.status(200).json({ ok: true, meta });
+    } catch (err) {
+      console.error('Error saving snapshot:', err);
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+  }
+
+  // ===== 📥 ACTION: GET LATEST SNAPSHOT =====
+  if (action === 'get_snapshot') {
+    const uid = String(body.userId || req.query.userId || '').trim();
+    if (!uid || !/^\d+$/.test(uid)) {
+      return res.status(400).json({ ok: false, error: 'invalid_user_id' });
+    }
+    const snapId = String(body.snapshotId || req.query.snapshotId || '').trim();
+
+    try {
+      let snapRaw = null;
+      if (snapId && snapId !== 'latest') {
+        snapRaw = await redis('GET', `user_snapshot:${uid}:${snapId}`);
+      }
+      if (!snapRaw?.result) {
+        snapRaw = await redis('GET', `user_latest_snapshot:${uid}`);
+      }
+
+      const metaRaw = await redis('GET', `user_latest_snapshot_meta:${uid}`);
+      let meta = null;
+      if (metaRaw?.result) {
+        try { meta = JSON.parse(metaRaw.result); } catch {}
+      }
+
+      if (snapRaw?.result) {
+        try {
+          const snapshot = JSON.parse(snapRaw.result);
+          return res.status(200).json({ ok: true, snapshot, meta });
+        } catch {}
+      }
+
+      // Fallback: If no full snapshot exists, check leaderboard for recovery stats
+      const lbRaw = await redis('HGET', 'leaderboard', uid);
+      if (lbRaw?.result) {
+        try {
+          const lb = JSON.parse(lbRaw.result);
+          if (lb && (Number(lb.t) > 0 || Number(lb.p) > 0 || Number(lb.d) > 0)) {
+            return res.status(200).json({
+              ok: true,
+              snapshot: null,
+              leaderboardRecovery: {
+                total: Number(lb.t) || 0,
+                focaccia: Number(lb.t) || 0,
+                prestige: Number(lb.p) || 0,
+                diamonds: Number(lb.d) || 0,
+                clicks: Number(lb.k) || 0,
+                bossesDefeated: Number(lb.b) || 0,
+                name: lb.n || '',
+              },
+            });
+          }
+        } catch {}
+      }
+
+      return res.status(200).json({ ok: false, error: 'no_snapshot' });
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+  }
+
+  // ===== 📜 ACTION: LIST SNAPSHOTS =====
+  if (action === 'list_snapshots') {
+    const uid = String(body.userId || req.query.userId || '').trim();
+    if (!uid) return res.status(400).json({ ok: false, error: 'invalid_user_id' });
+
+    try {
+      const histRaw = await redis('GET', `user_snapshot_history:${uid}`);
+      let history = [];
+      if (histRaw?.result) {
+        try { history = JSON.parse(histRaw.result); } catch {}
+      }
+      const latestMetaRaw = await redis('GET', `user_latest_snapshot_meta:${uid}`);
+      let latest = null;
+      if (latestMetaRaw?.result) {
+        try { latest = JSON.parse(latestMetaRaw.result); } catch {}
+      }
+
+      return res.status(200).json({ ok: true, latest, history });
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+  }
+
   // ===== 🤝 ACTION: ACK TRADE (Видалення трейду з pending_trades) =====
   if (action === 'ack_trade') {
     const uid = String(body.userId || req.query.userId || '').trim();
@@ -282,15 +438,16 @@ async function resolveUserId(input) {
       try { karma = Math.max(0, Math.min(100, JSON.parse(kRaw.result).k || 0)); } catch { /* */ }
     }
 
-    // Check global reset time
-    const globalResetData = await redis('GET', 'global_reset_time');
-    const globalResetTime = globalResetData?.result ? parseInt(globalResetData.result) : 0;
-
-    // Check individual reset flag
+    // Check individual reset flag (set EXCLUSIVELY by admin manually)
     const resetFlag = await redis('GET', `reset:${userId}`);
 
-    if (resetFlag?.result || (globalResetTime > 0 && userLastReset < globalResetTime)) {
-      if (resetFlag?.result) await redis('DEL', `reset:${userId}`);
+    if (resetFlag?.result) {
+      await redis('DEL', `reset:${userId}`);
+      // Safety backup of the latest snapshot before wiping
+      const currentSnap = await redis('GET', `user_latest_snapshot:${userId}`);
+      if (currentSnap?.result) {
+        await redis('SET', `user_snapshot_pre_wipe:${userId}`, currentSnap.result);
+      }
       await redis('DEL', `reward:${userId}`);
       await redis('DEL', `rebirth:${userId}`);
       await redis('DEL', `reward_gem:${userId}`);
@@ -298,10 +455,20 @@ async function resolveUserId(input) {
       return res.status(200).json({
         ok: true,
         reset: true,
-        resetTime: Math.max(globalResetTime, Date.now()),
+        resetTime: Date.now(),
         karma,
         maintenance: isMaintenance,
       });
+    }
+
+    // Check if admin dispatched an account restore
+    const restoreRaw = await redis('GET', `reward_restore:${userId}`);
+    let pendingRestore = null;
+    if (restoreRaw?.result) {
+      try {
+        pendingRestore = JSON.parse(restoreRaw.result);
+        await redis('DEL', `reward_restore:${userId}`);
+      } catch {}
     }
 
     // Check skins wipe (individual user flag or global wipe)
@@ -405,11 +572,12 @@ async function resolveUserId(input) {
         grantSkins,
         removeSkins,
         trades,
+        restore: pendingRestore,
         maintenance: isMaintenance,
       });
     }
 
-    return res.status(200).json({ ok: true, reward: 0, trades: [], karma, resetSkins, skinsResetTime, maintenance: isMaintenance });
+    return res.status(200).json({ ok: true, reward: 0, trades: [], karma, resetSkins, skinsResetTime, restore: pendingRestore, maintenance: isMaintenance });
   } catch (err) {
     console.error('Reward error:', err);
     return res.status(200).json({ ok: true, reward: 0, maintenance: isMaintenance });
