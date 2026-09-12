@@ -1485,70 +1485,120 @@ function escapeMd(str) {
   return String(str).replace(/[_*`\[\]]/g, '\\$&');
 }
 
-async function renderContestsAdminMenu() {
-  const activeIds = (await redis('SMEMBERS', 'active_contests'))?.result || [];
-  const scheduledIds = (await redis('SMEMBERS', 'scheduled_contests'))?.result || [];
+async function renderContestsAdminMenu(page = 0) {
+  const token = process.env.BOT_TOKEN;
+  if (token) {
+    await checkExpiredContests(token).catch(() => {});
+  }
+
+  const activeIdsRaw = (await redis('SMEMBERS', 'active_contests'))?.result || [];
+  const scheduledIdsRaw = (await redis('SMEMBERS', 'scheduled_contests'))?.result || [];
+  const historyIdsRaw = (await redis('LRANGE', 'history_contests', '0', '199'))?.result || [];
+  const allContestsRaw = (await redis('SMEMBERS', 'all_contests'))?.result || [];
+
+  const scheduledContests = [];
+  const scheduledIds = [];
+  for (const sId of scheduledIdsRaw) {
+    const raw = (await redis('HGET', 'contest:' + sId, 'data'))?.result;
+    if (raw) {
+      try {
+        const c = JSON.parse(raw);
+        if (c.status === 'scheduled') {
+          scheduledContests.push(c);
+          scheduledIds.push(sId);
+        } else {
+          await redis('SREM', 'scheduled_contests', sId);
+        }
+      } catch {
+        await redis('SREM', 'scheduled_contests', sId);
+      }
+    } else {
+      await redis('SREM', 'scheduled_contests', sId);
+    }
+  }
+
+  const activeContests = [];
+  const activeIds = [];
+  for (const cId of activeIdsRaw) {
+    const raw = (await redis('HGET', 'contest:' + cId, 'data'))?.result;
+    if (raw) {
+      try {
+        const c = JSON.parse(raw);
+        const isExpired = c.endTime && Date.now() >= c.endTime;
+        if (c.status === 'active' && !isExpired) {
+          const pCard = await redis('SCARD', 'contest:' + cId + ':participants');
+          const pCount = pCard?.result || 0;
+          activeContests.push({ cId, c, pCount });
+          activeIds.push(cId);
+        } else {
+          await redis('SREM', 'active_contests', cId);
+        }
+      } catch {
+        await redis('SREM', 'active_contests', cId);
+      }
+    } else {
+      await redis('SREM', 'active_contests', cId);
+    }
+  }
+
+  // Збираємо всі завершені / скасовані конкурси (зберігаючи порядок від новіших до старіших)
+  const candidatePastIds = [...historyIdsRaw, ...allContestsRaw, ...activeIdsRaw];
+  const uniquePastCandidates = Array.from(new Set(candidatePastIds));
+  const pastContestIds = uniquePastCandidates.filter((id) => !activeIds.includes(id) && !scheduledIds.includes(id));
+
   let text = `🎁 *РОЗІГРАШІ ТА КОНКУРСИ*\n\n`;
-  text += `Активних: *${activeIds.length}* | Запланованих: *${scheduledIds.length}*\n\n`;
+  text += `Активних: *${activeContests.length}* | Запланованих: *${scheduledContests.length}* | Завершених: *${pastContestIds.length}*\n\n`;
 
   const contestButtons = [];
 
-  if (scheduledIds.length > 0) {
+  if (scheduledContests.length > 0) {
     text += `*📅 Заплановані розіграші:*\n`;
-    for (const cId of scheduledIds) {
-      const raw = (await redis('HGET', 'contest:' + cId, 'data'))?.result;
-      if (raw) {
-        try {
-          const c = JSON.parse(raw);
-          const prize = formatContestCur(c.cur, c.amount);
-          const startFmt = formatKyivDate(c.scheduledStartTime || c.startTime);
-          const msToStart = (c.scheduledStartTime || c.startTime) - Date.now();
-          const toStart = msToStart > 0 ? formatDurationHours(Math.max(0.1, msToStart / 3600000)) : 'Запускається...';
-          text += `• *#${cId}*: ${prize} для ${c.winners} перем.\n  📅 Старт: *${startFmt}* (до старту: *${toStart}*)\n`;
-          contestButtons.push([
-            { text: `🚀 Запустити зараз #${cId.slice(-6)}`, callback_data: `admin:concurs_start:${cId}` },
-            { text: `❌ Скасувати #${cId.slice(-6)}`, callback_data: `admin:concurs_cancel:${cId}` },
-          ]);
-        } catch {}
-      }
+    for (const c of scheduledContests) {
+      const cId = c.id;
+      const prize = formatContestCur(c.cur, c.amount);
+      const startFmt = formatKyivDate(c.scheduledStartTime || c.startTime);
+      const msToStart = (c.scheduledStartTime || c.startTime) - Date.now();
+      const toStart = msToStart > 0 ? formatDurationHours(Math.max(0.1, msToStart / 3600000)) : 'Запускається...';
+      text += `• *#${cId}*: ${prize} для ${c.winners} перем.\n  📅 Старт: *${startFmt}* (до старту: *${toStart}*)\n`;
+      contestButtons.push([
+        { text: `🚀 Запустити зараз #${cId.slice(-6)}`, callback_data: `admin:concurs_start:${cId}` },
+        { text: `❌ Скасувати #${cId.slice(-6)}`, callback_data: `admin:concurs_cancel:${cId}` },
+      ]);
     }
     text += '\n';
   }
 
-  if (activeIds.length > 0) {
-    text += `*Список активних конкурсів:*\n`;
-    for (const cId of activeIds) {
-      const raw = (await redis('HGET', 'contest:' + cId, 'data'))?.result;
-      if (raw) {
-        try {
-          const c = JSON.parse(raw);
-          const pCard = await redis('SCARD', 'contest:' + cId + ':participants');
-          const pCount = pCard?.result || 0;
-          const prize = formatContestCur(c.cur, c.amount);
-          const msLeft = c.endTime - Date.now();
-          const timeLeft = msLeft > 0 ? formatDurationHours(Math.max(0.1, msLeft / 3600000)) : 'Завершується...';
-          text += `• *#${cId}*: ${prize} для ${c.winners} перем.\n  👥 Учасників: *${pCount}* | ⏱ Залишилось: *${timeLeft}*\n`;
-          contestButtons.push([
-            { text: `👥 Учасники (${pCount}) #${cId.slice(-6)}`, callback_data: `admin:contest_users:${cId}` },
-          ]);
-          contestButtons.push([
-            { text: `⚙️ Завершити #${cId.slice(-6)}`, callback_data: `admin:concurs_finish:${cId}` },
-            { text: `❌ Скасувати #${cId.slice(-6)}`, callback_data: `admin:concurs_cancel:${cId}` },
-          ]);
-        } catch {}
-      }
+  if (activeContests.length > 0) {
+    text += `*🟢 Активні розіграші:*\n`;
+    for (const item of activeContests) {
+      const { cId, c, pCount } = item;
+      const prize = formatContestCur(c.cur, c.amount);
+      const msLeft = c.endTime - Date.now();
+      const timeLeft = msLeft > 0 ? formatDurationHours(Math.max(0.1, msLeft / 3600000)) : 'Завершується...';
+      text += `• *#${cId}*: ${prize} для ${c.winners} перем.\n  👥 Учасників: *${pCount}* | ⏱ Залишилось: *${timeLeft}*\n`;
+      contestButtons.push([
+        { text: `👥 Учасники (${pCount}) #${cId.slice(-6)}`, callback_data: `admin:contest_users:${cId}` },
+      ]);
+      contestButtons.push([
+        { text: `⚙️ Завершити #${cId.slice(-6)}`, callback_data: `admin:concurs_finish:${cId}` },
+        { text: `❌ Скасувати #${cId.slice(-6)}`, callback_data: `admin:concurs_cancel:${cId}` },
+      ]);
     }
     text += '\n';
-  } else if (scheduledIds.length === 0) {
+  } else if (scheduledContests.length === 0 && pastContestIds.length === 0) {
     text += `Наразі немає активних або запланованих розіграшів.\n\n`;
   }
 
-  // Останні конкурси з історії (якщо є)
-  const historyIds = (await redis('LRANGE', 'history_contests', '0', '9'))?.result || [];
-  const pastIds = historyIds.filter((id) => !activeIds.includes(id)).slice(0, 3);
-  if (pastIds.length > 0) {
-    text += `*Останні завершені конкурси:*\n`;
-    for (const cId of pastIds) {
+  // Пагінація завершених конкурсів (по 4 на сторінку)
+  const PAGE_SIZE = 4;
+  const totalPages = Math.max(1, Math.ceil(pastContestIds.length / PAGE_SIZE));
+  const curPage = Math.min(Math.max(0, page), totalPages - 1);
+  const startIdx = curPage * PAGE_SIZE;
+  const pageItems = pastContestIds.slice(startIdx, startIdx + PAGE_SIZE);
+
+  if (pastContestIds.length > 0) {
+    text += `*🏁 Завершені розіграші* (стор. ${curPage + 1} з ${totalPages}):\n`;
+    for (const cId of pageItems) {
       const raw = (await redis('HGET', 'contest:' + cId, 'data'))?.result;
       if (raw) {
         try {
@@ -1566,6 +1616,22 @@ async function renderContestsAdminMenu() {
       }
     }
     text += '\n';
+
+    // Рядок пагінації: ⬅️ 1 / N ➡️
+    const navRow = [];
+    navRow.push({
+      text: '⬅️',
+      callback_data: curPage > 0 ? `admin:concurs_page:${curPage - 1}` : 'admin:none',
+    });
+    navRow.push({
+      text: totalPages > 1 ? `${curPage + 1} / ${totalPages}` : `${curPage + 1}`,
+      callback_data: 'admin:none',
+    });
+    navRow.push({
+      text: '➡️',
+      callback_data: curPage < totalPages - 1 ? `admin:concurs_page:${curPage + 1}` : 'admin:none',
+    });
+    contestButtons.push(navRow);
   }
 
   const reply_markup = {
@@ -4539,6 +4605,15 @@ module.exports = async function handler(req, res) {
       if (action === 'contest_txt') {
         const contestId = targetId;
         await sendContestParticipantsFile(TOKEN, cqChat, contestId);
+        return res.status(200).json({ ok: true });
+      }
+
+      // Пагінація завершених конкурсів в адмінці
+      if (action === 'concurs_page') {
+        const page = parseInt(targetId || '0', 10);
+        if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+        const menu = await renderContestsAdminMenu(page);
+        await sendTg(TOKEN, 'sendMessage', { chat_id: cqChat, ...menu });
         return res.status(200).json({ ok: true });
       }
 
