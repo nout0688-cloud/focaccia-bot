@@ -57,6 +57,17 @@ module.exports = async function handler(req, res) {
     return res.status(200).json({ ok: true, maintenance: isM });
   }
 
+  // ===== 🤝 ACTION: ACK TRADE (Видалення трейду з pending_trades) =====
+  if (action === 'ack_trade') {
+    const uid = String(body.userId || req.query.userId || '').trim();
+    const tId = String(body.tradeId || req.query.tradeId || '').trim();
+    if (uid && tId) {
+      await redis('HDEL', `pending_trades:${uid}`, tId);
+      return res.status(200).json({ ok: true });
+    }
+    return res.status(400).json({ ok: false, error: 'missing_params' });
+  }
+
   // ===== 👑 ADMIN ACTION: DISTRIBUTE TO ALL PLAYERS =====
   if (action === 'distribute') {
     const reqAdminId = parseInt(body.adminId || req.query.adminId || '0', 10);
@@ -330,6 +341,9 @@ async function resolveUserId(input) {
     const deductData = await redis('GET', `deduct:${userId}`);
     const deduct = deductData?.result ? parseInt(deductData.result) : 0;
 
+    const deductGemData = await redis('GET', `deduct_gem:${userId}`);
+    const deductDiamonds = deductGemData?.result ? parseInt(deductGemData.result) : 0;
+
     const extraUpgradeData = await redis('HGET', `user_extra:${userId}`, 'vip_upgrade');
     const extraUpgrade = extraUpgradeData?.result || null;
 
@@ -348,7 +362,19 @@ async function resolveUserId(input) {
       try { removeSkins = JSON.parse(lostSkinsRaw.result); } catch {}
     }
 
-    if (amount > 0 || rebirths > 0 || diamonds > 0 || deduct > 0 || extraUpgrade || patronBadge || resetSkins || grantSkins.length > 0 || removeSkins.length > 0) {
+    // Трейди, що очікують зарахування гравцю
+    const pendingTradesRaw = await redis('HGETALL', `pending_trades:${userId}`);
+    let trades = [];
+    if (pendingTradesRaw?.result && Array.isArray(pendingTradesRaw.result)) {
+      for (let i = 0; i < pendingTradesRaw.result.length; i += 2) {
+        try {
+          const tObj = JSON.parse(pendingTradesRaw.result[i + 1]);
+          trades.push(tObj);
+        } catch {}
+      }
+    }
+
+    if (amount > 0 || rebirths > 0 || diamonds > 0 || deduct > 0 || deductDiamonds > 0 || extraUpgrade || patronBadge || resetSkins || grantSkins.length > 0 || removeSkins.length > 0 || trades.length > 0) {
       // Clear pending grants after claiming
       if (amount > 0) await redis('DEL', `reward:${userId}`);
       if (rebirths > 0) await redis('DEL', `rebirth:${userId}`);
@@ -357,6 +383,7 @@ async function resolveUserId(input) {
         await redis('DEL', `reward_gem_source:${userId}`);
       }
       if (deduct > 0) await redis('DEL', `deduct:${userId}`);
+      if (deductDiamonds > 0) await redis('DEL', `deduct_gem:${userId}`);
       if (extraUpgrade) await redis('HDEL', `user_extra:${userId}`, 'vip_upgrade');
       if (patronBadge) await redis('HDEL', `user_extra:${userId}`, 'badge_patron');
       if (grantSkins.length > 0) await redis('DEL', `reward_skins:${userId}`);
@@ -369,6 +396,7 @@ async function resolveUserId(input) {
         diamonds,
         gemSource,
         deduct,
+        deductDiamonds,
         extraUpgrade,
         patronBadge,
         karma,
@@ -376,11 +404,12 @@ async function resolveUserId(input) {
         skinsResetTime,
         grantSkins,
         removeSkins,
+        trades,
         maintenance: isMaintenance,
       });
     }
 
-    return res.status(200).json({ ok: true, reward: 0, karma, resetSkins, skinsResetTime, maintenance: isMaintenance });
+    return res.status(200).json({ ok: true, reward: 0, trades: [], karma, resetSkins, skinsResetTime, maintenance: isMaintenance });
   } catch (err) {
     console.error('Reward error:', err);
     return res.status(200).json({ ok: true, reward: 0, maintenance: isMaintenance });

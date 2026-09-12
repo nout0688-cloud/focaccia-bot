@@ -100,6 +100,139 @@ module.exports = async function handler(req, res) {
   const now = Date.now();
 
   try {
+    // 0.1 Отримати список активних гравців для лобі трейдів
+    if (action === 'get_active_players') {
+      const myId = String(req.query.userId || body.userId || '');
+      const players = [];
+      const seenIds = new Set();
+      if (myId) seenIds.add(myId);
+
+      const lbRaw = await redis('HGETALL', 'leaderboard');
+      if (lbRaw?.result && Array.isArray(lbRaw.result)) {
+        for (let i = 0; i < lbRaw.result.length; i += 2) {
+          const id = String(lbRaw.result[i]);
+          if (seenIds.has(id)) continue;
+          try {
+            const d = JSON.parse(lbRaw.result[i + 1]);
+            seenIds.add(id);
+            players.push({
+              id,
+              name: d.n || d.name || 'Гравець',
+              username: d.u || d.username || '',
+              score: Number(d.t) || 0,
+            });
+          } catch {}
+        }
+      }
+
+      if (players.length < 20) {
+        const usersRaw = await redis('HGETALL', 'users');
+        if (usersRaw?.result && Array.isArray(usersRaw.result)) {
+          for (let i = 0; i < usersRaw.result.length; i += 2) {
+            const id = String(usersRaw.result[i]);
+            if (seenIds.has(id)) continue;
+            try {
+              const u = JSON.parse(usersRaw.result[i + 1]);
+              seenIds.add(id);
+              players.push({
+                id,
+                name: u.name || u.first_name || 'Гравець',
+                username: u.username || '',
+                score: 0,
+              });
+              if (players.length >= 25) break;
+            } catch {}
+          }
+        }
+      }
+
+      return res.status(200).json({ ok: true, players: players.slice(0, 25) });
+    }
+
+    // 0.2 Пошук гравця за @username або ID
+    if (action === 'find_player') {
+      const q = String(req.query.q || body.q || '').trim();
+      if (!q) return res.status(400).json({ ok: false, error: 'empty_query' });
+      const cleanQ = q.replace(/^@/, '').toLowerCase();
+
+      // Шукаємо за точним ID
+      if (/^\d{4,25}$/.test(cleanQ)) {
+        const uRaw = await redis('HGET', 'users', cleanQ);
+        if (uRaw?.result) {
+          try {
+            const u = JSON.parse(uRaw.result);
+            return res.status(200).json({
+              ok: true,
+              player: {
+                id: cleanQ,
+                name: u.name || u.first_name || 'Гравець',
+                username: u.username || '',
+              },
+            });
+          } catch {}
+        }
+      }
+
+      // Шукаємо за юзернеймом у leaderboard
+      const lbRaw = await redis('HGETALL', 'leaderboard');
+      if (lbRaw?.result && Array.isArray(lbRaw.result)) {
+        for (let i = 0; i < lbRaw.result.length; i += 2) {
+          const id = String(lbRaw.result[i]);
+          try {
+            const d = JSON.parse(lbRaw.result[i + 1]);
+            const u = String(d.u || d.username || '').toLowerCase();
+            if (u === cleanQ) {
+              return res.status(200).json({
+                ok: true,
+                player: {
+                  id,
+                  name: d.n || d.name || 'Гравець',
+                  username: d.u || d.username || '',
+                  score: Number(d.t) || 0,
+                },
+              });
+            }
+          } catch {}
+        }
+      }
+
+      // Шукаємо за юзернеймом у users
+      const usersRaw = await redis('HGETALL', 'users');
+      if (usersRaw?.result && Array.isArray(usersRaw.result)) {
+        for (let i = 0; i < usersRaw.result.length; i += 2) {
+          const id = String(usersRaw.result[i]);
+          try {
+            const u = JSON.parse(usersRaw.result[i + 1]);
+            const un = String(u.username || '').toLowerCase();
+            if (un === cleanQ) {
+              return res.status(200).json({
+                ok: true,
+                player: {
+                  id,
+                  name: u.name || u.first_name || 'Гравець',
+                  username: u.username || '',
+                  score: 0,
+                },
+              });
+            }
+          } catch {}
+        }
+      }
+
+      return res.status(200).json({ ok: false, error: 'not_found' });
+    }
+
+    // 0.3 Підтвердження отримання трейду (видалення з pending_trades)
+    if (action === 'ack_trade') {
+      const uid = String(body.userId || req.query.userId || '').trim();
+      const tId = String(body.tradeId || req.query.tradeId || '').trim();
+      if (uid && tId) {
+        await redis('HDEL', `pending_trades:${uid}`, tId);
+        return res.status(200).json({ ok: true });
+      }
+      return res.status(400).json({ ok: false, error: 'missing_params' });
+    }
+
     // 1. Отримати актуальний баланс користувача
     if (action === 'get_balance') {
       const userId = String(body.userId || req.query.userId || '');
@@ -119,7 +252,7 @@ module.exports = async function handler(req, res) {
       if (!from || !/^[a-zA-Z0-9_-]{1,40}$/.test(from)) {
         return res.status(400).json({ ok: false, error: 'invalid_from' });
       }
-      if (to && from === to) {
+      if (to && String(from) === String(to)) {
         return res.status(400).json({ ok: false, error: 'self_trade_not_allowed' });
       }
 
@@ -127,8 +260,8 @@ module.exports = async function handler(req, res) {
       const trade = {
         id: tradeId,
         stage: 'active', // active | completed | cancelled
-        p1: { id: from, name: fromName, u: fromU },
-        p2: to ? { id: to, name: '', u: '' } : null,
+        p1: { id: String(from), name: fromName, u: fromU },
+        p2: to ? { id: String(to), name: '', u: '' } : null,
         p1Offer: { focaccia: 0, diamonds: 0, skins: [] },
         p2Offer: { focaccia: 0, diamonds: 0, skins: [] },
         p1Locked: false,
@@ -171,7 +304,7 @@ module.exports = async function handler(req, res) {
     if (action === 'preview') {
       const trade = await getTrade(tradeId);
       if (!trade) return res.status(200).json({ ok: false, error: 'not_found' });
-      const hasP2 = Boolean(trade.p2 && trade.p2.id && trade.p2.id !== 'null' && trade.p2.id !== 'undefined');
+      const hasP2 = Boolean(trade.p2 && trade.p2.id && String(trade.p2.id) !== 'null' && String(trade.p2.id) !== 'undefined');
       return res.status(200).json({
         ok: true,
         trade: {
@@ -180,8 +313,8 @@ module.exports = async function handler(req, res) {
           p1: { name: trade.p1.name, u: trade.p1.u },
           p2: hasP2 ? { name: trade.p2.name, u: trade.p2.u } : null,
           hasP2,
-          isP1: trade.p1.id === userId,
-          isP2: hasP2 && trade.p2.id === userId,
+          isP1: String(trade.p1?.id) === String(userId),
+          isP2: hasP2 && String(trade.p2?.id) === String(userId),
         },
       });
     }
@@ -195,14 +328,14 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: false, error: 'not_found' });
     }
 
-    let isP1 = trade.p1.id === userId;
-    let isP2 = Boolean(trade.p2 && trade.p2.id === userId);
-    const isP2Empty = !trade.p2 || !trade.p2.id || trade.p2.id === 'null' || trade.p2.id === 'undefined';
+    let isP1 = String(trade.p1?.id) === String(userId);
+    let isP2 = Boolean(trade.p2 && String(trade.p2.id) === String(userId));
+    const isP2Empty = !trade.p2 || !trade.p2.id || String(trade.p2.id) === 'null' || String(trade.p2.id) === 'undefined' || String(trade.p2.id) === '0';
 
     // Приєднання до відкритого посилання (open trade), якщо p2 ще немає і гравець не p1
     if (!isP1 && !isP2 && isP2Empty) {
       trade.p2 = {
-        id: userId,
+        id: String(userId),
         name: String(body.name || 'Гравець').slice(0, 24),
         u: String(body.u || '').slice(0, 32),
       };
@@ -267,6 +400,16 @@ module.exports = async function handler(req, res) {
 
     // 3. Синхронізація пропозицій (Sync)
     if (action === 'sync') {
+      // Оновлюємо кеш балансу користувача, якщо передано перевірений клієнтський баланс
+      if (body.clientBalance && typeof body.clientBalance === 'object') {
+        const cF = Math.max(0, Math.min(Number(body.clientBalance.f) || 0, 1e24));
+        const cD = Math.max(0, Math.min(Number(body.clientBalance.d) || 0, 1e9));
+        const curBal = await getUserBalance(userId);
+        if (cF > curBal.f || cD > curBal.d) {
+          await setUserBalance(userId, Math.max(curBal.f, cF), Math.max(curBal.d, cD));
+        }
+      }
+
       if (trade.stage === 'active' && body.offer && typeof body.offer === 'object') {
         const myLock = isP1 ? trade.p1Locked : trade.p2Locked;
         // Якщо гравець ще не зафіксував пропозицію або явно її редагує:
@@ -323,7 +466,7 @@ module.exports = async function handler(req, res) {
           locked: meLocked,
           confirmed: meConfirmed,
         },
-        opp: opp ? {
+        opp: (opp && opp.id && String(opp.id) !== 'null' && String(opp.id) !== 'undefined') ? {
           id: opp.id,
           name: opp.name || 'Партнер',
           u: opp.u || '',
@@ -371,6 +514,16 @@ module.exports = async function handler(req, res) {
           return res.status(200).json({ ok: true, stage: trade.stage });
         }
 
+        // Оновлюємо баланси з клієнтських даних, якщо передано
+        if (body.clientBalance && typeof body.clientBalance === 'object') {
+          const cF = Math.max(0, Math.min(Number(body.clientBalance.f) || 0, 1e24));
+          const cD = Math.max(0, Math.min(Number(body.clientBalance.d) || 0, 1e9));
+          const curBal = await getUserBalance(userId);
+          if (cF > curBal.f || cD > curBal.d) {
+            await setUserBalance(userId, Math.max(curBal.f, cF), Math.max(curBal.d, cD));
+          }
+        }
+
         // Перевіряємо актуальні баланси обох гравців
         const balP1 = await getUserBalance(trade.p1.id);
         const balP2 = await getUserBalance(trade.p2.id);
@@ -388,26 +541,61 @@ module.exports = async function handler(req, res) {
           return res.status(200).json({ ok: false, error: 'insufficient_funds_p2' });
         }
 
-        // Атомарне оновлення балансів:
-        const nextP1F = Math.max(0, balP1.f - trade.p1Offer.focaccia + trade.p2Offer.focaccia);
-        const nextP1D = Math.max(0, balP1.d - trade.p1Offer.diamonds + trade.p2Offer.diamonds);
-        const nextP2F = Math.max(0, balP2.f - trade.p2Offer.focaccia + trade.p1Offer.focaccia);
-        const nextP2D = Math.max(0, balP2.d - trade.p2Offer.diamonds + trade.p1Offer.diamonds);
+        const p1Offer = trade.p1Offer || { focaccia: 0, diamonds: 0, skins: [] };
+        const p2Offer = trade.p2Offer || { focaccia: 0, diamonds: 0, skins: [] };
+
+        const p1GainFoc = p2Offer.focaccia || 0;
+        const p1LossFoc = p1Offer.focaccia || 0;
+        const p1GainDia = p2Offer.diamonds || 0;
+        const p1LossDia = p1Offer.diamonds || 0;
+        const p1GrantSkins = p2Offer.skins || [];
+        const p1RemoveSkins = p1Offer.skins || [];
+
+        const p2GainFoc = p1Offer.focaccia || 0;
+        const p2LossFoc = p2Offer.focaccia || 0;
+        const p2GainDia = p1Offer.diamonds || 0;
+        const p2LossDia = p2Offer.diamonds || 0;
+        const p2GrantSkins = p1Offer.skins || [];
+        const p2RemoveSkins = p2Offer.skins || [];
+
+        // 1. Атомарне оновлення user_balance у Redis:
+        const nextP1F = Math.max(0, balP1.f - p1LossFoc + p1GainFoc);
+        const nextP1D = Math.max(0, balP1.d - p1LossDia + p1GainDia);
+        const nextP2F = Math.max(0, balP2.f - p2LossFoc + p2GainFoc);
+        const nextP2D = Math.max(0, balP2.d - p2LossDia + p2GainDia);
 
         await setUserBalance(trade.p1.id, nextP1F, nextP1D);
         await setUserBalance(trade.p2.id, nextP2F, nextP2D);
 
-        // Обмін скінами через черги винагород
-        if (trade.p1Offer.skins.length > 0) {
-          // P1 втрачає свої скіни, P2 отримує їх
-          await redis('SET', `lost_skins:${trade.p1.id}`, JSON.stringify(trade.p1Offer.skins));
-          await redis('SET', `reward_skins:${trade.p2.id}`, JSON.stringify(trade.p1Offer.skins));
-        }
-        if (trade.p2Offer.skins.length > 0) {
-          // P2 втрачає свої скіни, P1 отримує їх
-          await redis('SET', `lost_skins:${trade.p2.id}`, JSON.stringify(trade.p2Offer.skins));
-          await redis('SET', `reward_skins:${trade.p1.id}`, JSON.stringify(trade.p2Offer.skins));
-        }
+        // 2. Гарантована доставка винагород через чергу pending_trades для App.tsx:
+        const p1TradeData = {
+          tradeId: trade.id,
+          focacciaGain: p1GainFoc,
+          focacciaLoss: p1LossFoc,
+          diamondGain: p1GainDia,
+          diamondLoss: p1LossDia,
+          grantSkins: p1GrantSkins,
+          removeSkins: p1RemoveSkins,
+          partnerName: trade.p2.name || 'Партнер',
+          partnerId: String(trade.p2.id),
+          completedAt: now,
+        };
+
+        const p2TradeData = {
+          tradeId: trade.id,
+          focacciaGain: p2GainFoc,
+          focacciaLoss: p2LossFoc,
+          diamondGain: p2GainDia,
+          diamondLoss: p2LossDia,
+          grantSkins: p2GrantSkins,
+          removeSkins: p2RemoveSkins,
+          partnerName: trade.p1.name || 'Партнер',
+          partnerId: String(trade.p1.id),
+          completedAt: now,
+        };
+
+        await redis('HSET', `pending_trades:${trade.p1.id}`, trade.id, JSON.stringify(p1TradeData));
+        await redis('HSET', `pending_trades:${trade.p2.id}`, trade.id, JSON.stringify(p2TradeData));
 
         trade.stage = 'completed';
         trade.completedAt = now;
@@ -415,14 +603,14 @@ module.exports = async function handler(req, res) {
 
         // Надсилаємо привітальні сповіщення у Telegram
         const p1Got = [];
-        if (trade.p2Offer.focaccia > 0) p1Got.push(`${trade.p2Offer.focaccia.toLocaleString()} 🫓`);
-        if (trade.p2Offer.diamonds > 0) p1Got.push(`${trade.p2Offer.diamonds} 💎`);
-        if (trade.p2Offer.skins.length > 0) p1Got.push(`${trade.p2Offer.skins.length} скін(ів)`);
+        if (p1GainFoc > 0) p1Got.push(`${p1GainFoc.toLocaleString()} 🫓`);
+        if (p1GainDia > 0) p1Got.push(`${p1GainDia} 💎`);
+        if (p1GrantSkins.length > 0) p1Got.push(`${p1GrantSkins.length} скін(ів)`);
 
         const p2Got = [];
-        if (trade.p1Offer.focaccia > 0) p2Got.push(`${trade.p1Offer.focaccia.toLocaleString()} 🫓`);
-        if (trade.p1Offer.diamonds > 0) p2Got.push(`${trade.p1Offer.diamonds} 💎`);
-        if (trade.p1Offer.skins.length > 0) p2Got.push(`${trade.p1Offer.skins.length} скін(ів)`);
+        if (p2GainFoc > 0) p2Got.push(`${p2GainFoc.toLocaleString()} 🫓`);
+        if (p2GainDia > 0) p2Got.push(`${p2GainDia} 💎`);
+        if (p2GrantSkins.length > 0) p2Got.push(`${p2GrantSkins.length} скін(ів)`);
 
         await sendTg(trade.p1.id, `🎉 *Трейд успішно здійснено!*\nТи отримав від ${trade.p2.name}: ${p1Got.join(', ') || 'нічого'}.\nЗайди в гру, щоб переглянути інвентар!`, { parse_mode: 'Markdown' });
         await sendTg(trade.p2.id, `🎉 *Трейд успішно здійснено!*\nТи отримав від ${trade.p1.name}: ${p2Got.join(', ') || 'нічого'}.\nЗайди в гру, щоб переглянути інвентар!`, { parse_mode: 'Markdown' });
