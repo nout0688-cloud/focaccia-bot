@@ -1106,11 +1106,14 @@ async function getAdminPanelMessage() {
         { text: '🎉 Конкурси', callback_data: 'admin:menu:contests' },
       ],
       [
+        { text: '🎭 Рофли / Звуки', callback_data: 'admin:menu:rofl' },
+        { text: '🧹 Забрати скіни', callback_data: 'admin:menu:takeskins' },
+      ],
+      [
         { text: '🏆 Очистити топ', callback_data: 'admin:menu:lb_clear' },
         { text: '⚠️ Скинути акаунт', callback_data: 'admin:menu:reset' },
       ],
       [
-        { text: '🧹 Забрати скіни', callback_data: 'admin:menu:takeskins' },
         { text: '❌ Закрити панель', callback_data: 'admin:close' },
       ],
     ],
@@ -1938,8 +1941,11 @@ async function renderUserCard(target) {
   if (kRaw) { try { karma = Math.max(0, Math.min(100, JSON.parse(kRaw).k || 0)); } catch {} }
   const isFlagged = totalDetects > 0 || karma < 75;
 
+  const isOnlineRaw = await redis('GET', `user_online:${uId}`);
+  const isOnline = isOnlineRaw?.result === '1';
+
   let text = `👤 *КАРТКА ГРАВЦЯ*\n\n`;
-  text += `• Гравець: ${target.display}\n`;
+  text += `• Гравець: ${target.display} ${isOnline ? '🟢 *[ЗАРАЗ У ГРІ]*' : '⚪ (офлайн)'}\n`;
   text += `• Ім'я: *${target.name}*\n`;
   text += `• ID: \`${uId}\`\n\n`;
 
@@ -1962,6 +1968,9 @@ async function renderUserCard(target) {
   const reply_markup = {
     inline_keyboard: [
       [
+        { text: `🔊 Увімкнути звук (${isOnline ? '🟢 У грі' : '⚪ Офлайн'})`, callback_data: `admin:user_sounds_menu:${uId}` },
+      ],
+      [
         { text: '+🫓 Фокачі', callback_data: `admin:prompt:giveto_target:${uId}` },
         { text: '+💎 Алмази', callback_data: `admin:prompt:diamondto_target:${uId}` },
       ],
@@ -1983,6 +1992,152 @@ async function renderUserCard(target) {
     ],
   };
   return { text, parse_mode: 'Markdown', reply_markup };
+}
+
+const ROFL_SOUND_NAMES = {
+  vine_boom: '💥 Vine Boom',
+  fart: '💨 Пердьож',
+  screamer: '😱 Скрімер',
+  bruh: '🗿 Bruh',
+  doorbell: '🚪 Дзвінок у двері',
+  knocking: '✊ Стук у двері',
+  sad_trombone: '🎺 Сумна труба',
+  alarm: '⏰ Будильник',
+  airhorn: '📢 Airhorn',
+  oof: '💀 OOF',
+};
+
+async function renderUserSoundsMenu(targetId) {
+  const target = await resolveTargetUser(targetId);
+  const uId = target ? target.id : targetId;
+  const isOnlineRaw = await redis('GET', `user_online:${uId}`);
+  const isOnline = isOnlineRaw?.result === '1';
+
+  let text = `🎭 *ЗВУКОВИЙ ТРОЛІНГ (РОФЛ)*\n\n`;
+  text += `👤 Гравець: *${target?.display || uId}*\n`;
+  text += `📡 Статус: *${isOnline ? '🟢 Зараз грає у Фокача Клікер!' : '⚪ Зараз офлайн'}*\n\n`;
+  if (isOnline) {
+    text += `⚡ _Гравець зараз у грі! Звук увімкнеться миттєво (за 1-3 сек) прямо під час тапання, а телефон завібрує!_ 🔊💥\n\n`;
+  } else {
+    text += `💤 _Гравець зараз не в грі. Звук увімкнеться, щойно він запустить клікер!_\n\n`;
+  }
+  text += `👇 *Оберіть звук для відтворення:*`;
+
+  const reply_markup = {
+    inline_keyboard: [
+      [
+        { text: '💥 Vine Boom', callback_data: `admin:send_sound:${uId}:vine_boom` },
+        { text: '💨 Пердьож', callback_data: `admin:send_sound:${uId}:fart` },
+      ],
+      [
+        { text: '😱 Скрімер', callback_data: `admin:send_sound:${uId}:screamer` },
+        { text: '🗿 Bruh', callback_data: `admin:send_sound:${uId}:bruh` },
+      ],
+      [
+        { text: '🚪 Дзвінок у двері', callback_data: `admin:send_sound:${uId}:doorbell` },
+        { text: '✊ Стук у двері', callback_data: `admin:send_sound:${uId}:knocking` },
+      ],
+      [
+        { text: '🎺 Сумна труба', callback_data: `admin:send_sound:${uId}:sad_trombone` },
+        { text: '⏰ Будильник', callback_data: `admin:send_sound:${uId}:alarm` },
+      ],
+      [
+        { text: '📢 Airhorn', callback_data: `admin:send_sound:${uId}:airhorn` },
+        { text: '💀 OOF', callback_data: `admin:send_sound:${uId}:oof` },
+      ],
+      [
+        { text: '👤 До картки гравця', callback_data: `admin:check_user:${uId}` },
+        { text: '⬅️ Головне меню', callback_data: 'admin:back' },
+      ],
+    ],
+  };
+  return { text, parse_mode: 'Markdown', reply_markup };
+}
+
+async function renderAllSoundsMenu() {
+  const text =
+    `📢 *МАСОВИЙ ЗВУКОВИЙ ТРОЛІНГ (ВСІМ ОНЛАЙН)*\n\n` +
+    `⚠️ *Увага!* Обраний звук увімкнеться у **ВСІХ гравців**, які зараз грають або зайдуть у гру протягом 45 секунд! 🔊💥\n\n` +
+    `👇 *Оберіть звук:*`;
+
+  const reply_markup = {
+    inline_keyboard: [
+      [
+        { text: '💥 Vine Boom усім', callback_data: 'admin:send_sound_all:vine_boom' },
+        { text: '💨 Пердьож усім', callback_data: 'admin:send_sound_all:fart' },
+      ],
+      [
+        { text: '😱 Скрімер усім', callback_data: 'admin:send_sound_all:screamer' },
+        { text: '🗿 Bruh усім', callback_data: 'admin:send_sound_all:bruh' },
+      ],
+      [
+        { text: '🚪 Дзвінок у двері', callback_data: 'admin:send_sound_all:doorbell' },
+        { text: '✊ Стук у двері', callback_data: 'admin:send_sound_all:knocking' },
+      ],
+      [
+        { text: '🎺 Сумна труба', callback_data: 'admin:send_sound_all:sad_trombone' },
+        { text: '⏰ Будильник', callback_data: 'admin:send_sound_all:alarm' },
+      ],
+      [
+        { text: '📢 Airhorn усім', callback_data: 'admin:send_sound_all:airhorn' },
+        { text: '💀 OOF усім', callback_data: 'admin:send_sound_all:oof' },
+      ],
+      [
+        { text: '🎭 До рофл-меню', callback_data: 'admin:menu:rofl' },
+        { text: '⬅️ Головне меню', callback_data: 'admin:back' },
+      ],
+    ],
+  };
+  return { text, parse_mode: 'Markdown', reply_markup };
+}
+
+async function renderRoflMenu() {
+  const usersData = await redis('HGETALL', 'users');
+  const onlineUsers = [];
+  if (usersData?.result) {
+    for (let i = 0; i < usersData.result.length; i += 2) {
+      const uId = usersData.result[i];
+      const isOnline = (await redis('GET', `user_online:${uId}`))?.result === '1';
+      if (isOnline) {
+        try {
+          const u = JSON.parse(usersData.result[i + 1]);
+          onlineUsers.push({ id: uId, name: u.name || uId, username: u.username || '' });
+        } catch {
+          onlineUsers.push({ id: uId, name: uId, username: '' });
+        }
+      }
+    }
+  }
+
+  let text = `🎭 *РОФЛ ТА ЗВУКОВИЙ ТРОЛІНГ ГРАВЦІВ*\n\n`;
+  text += `Тут ви можете обрати мемний звук. Якщо людина прямо зараз грає в клікер — у неї несподівано увімкнеться цей звук на повну гучність прямо під час тапання фокачі! 😂🔊\n\n`;
+  text += `🟢 *Зараз онлайн у грі: ${onlineUsers.length}*\n`;
+  if (onlineUsers.length > 0) {
+    onlineUsers.forEach((u, i) => {
+      text += `${i + 1}. ${u.username ? '@' + u.username : u.name} (\`${u.id}\`)\n`;
+    });
+  } else {
+    text += `_Наразі ніхто не тапає. Але ви можете надіслати звук будь-якому гравцю — він спрацює як тільки гравець зайде в гру!_\n`;
+  }
+  text += `\n👇 *Оберіть дію:*`;
+
+  const rows = [];
+  if (onlineUsers.length > 0) {
+    for (const u of onlineUsers.slice(0, 4)) {
+      rows.push([{ text: `🔊 ${u.username ? '@' + u.username : u.name.slice(0, 14)} 🟢`, callback_data: `admin:user_sounds_menu:${u.id}` }]);
+    }
+  }
+  rows.push([
+    { text: '🎯 Обрати гравця за @username / ID', callback_data: 'admin:prompt:rofl_target' },
+  ]);
+  rows.push([
+    { text: '📢 Увімкнути звук ВСІМ онлайн!', callback_data: 'admin:all_sounds_menu' },
+  ]);
+  rows.push([
+    { text: '⬅️ Назад до адмінки', callback_data: 'admin:back' },
+  ]);
+
+  return { text, parse_mode: 'Markdown', reply_markup: { inline_keyboard: rows } };
 }
 
 function formatAcLogTxt(target, targetChatId, karma, totalDetects, strikes, logs) {
@@ -2399,6 +2554,27 @@ async function handleAdminAwaitInput(TOKEN, chatId, text, awaitData) {
         ],
       },
     });
+    return;
+  }
+
+  if (action === 'rofl_target') {
+    const raw = text.trim();
+    const target = await resolveTargetUser(raw);
+    if (!target) {
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: `❌ Користувача "${raw}" не знайдено в базі.`,
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '🔄 Спробувати ще раз', callback_data: 'admin:prompt:rofl_target' }],
+            [{ text: '🎭 До рофл-меню', callback_data: 'admin:menu:rofl' }],
+          ],
+        },
+      });
+      return;
+    }
+    const menu = await renderUserSoundsMenu(target.id);
+    await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, ...menu });
     return;
   }
 
@@ -4088,6 +4264,7 @@ module.exports = async function handler(req, res) {
         else if (sub === 'reset') menuData = renderResetMenu();
         else if (sub === 'lb_clear') menuData = renderLbClearConfirm();
         else if (sub === 'takeskins') menuData = renderTakeSkinsMenu();
+        else if (sub === 'rofl') menuData = await renderRoflMenu();
         else menuData = await getAdminPanelMessage();
 
         await sendTg(TOKEN, 'sendMessage', { chat_id: cqChat, ...menuData });
@@ -4322,6 +4499,8 @@ module.exports = async function handler(req, res) {
           promptText = '✍️ *Перегляд учасників конкурсу*\nВведіть ID конкурсу (наприклад: `c_1712345678901`):';
         } else if (promptType === 'takeskins') {
           promptText = '✍️ *Забрати скіни у гравця*\nВведіть `@username`, числовий `ID` або слово `all` для скидання скінів усім:';
+        } else if (promptType === 'rofl_target') {
+          promptText = '✍️ *Введіть @username або числовий ID гравця, якому хочете увімкнути звук:*';
         }
 
         const pSent = await sendTg(TOKEN, 'sendMessage', {
@@ -4614,6 +4793,80 @@ module.exports = async function handler(req, res) {
         if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
         const menu = await renderContestsAdminMenu(page);
         await sendTg(TOKEN, 'sendMessage', { chat_id: cqChat, ...menu });
+        return res.status(200).json({ ok: true });
+      }
+
+      // Меню звукового тролінгу конкретного гравця
+      if (action === 'user_sounds_menu') {
+        if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+        const menu = await renderUserSoundsMenu(targetId);
+        await sendTg(TOKEN, 'sendMessage', { chat_id: cqChat, ...menu });
+        return res.status(200).json({ ok: true });
+      }
+
+      // Меню звукового тролінгу всіх онлайн
+      if (action === 'all_sounds_menu') {
+        if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+        const menu = await renderAllSoundsMenu();
+        await sendTg(TOKEN, 'sendMessage', { chat_id: cqChat, ...menu });
+        return res.status(200).json({ ok: true });
+      }
+
+      // Відправка звуку конкретному гравцю
+      if (action === 'send_sound') {
+        const tId = targetId;
+        const soundKey = parts[3];
+        await redis('SET', `rofl_sound:${tId}`, soundKey, 'EX', 180);
+        const target = await resolveTargetUser(tId);
+        const isOnlineRaw = await redis('GET', `user_online:${tId}`);
+        const isOnline = isOnlineRaw?.result === '1';
+        const sName = ROFL_SOUND_NAMES[soundKey] || soundKey;
+        const msg =
+          `🔊 *ЗВУК ВІДПРАВЛЕНО!* 😂\n\n` +
+          `👤 Гравець: *${target?.display || tId}*\n` +
+          `🎵 Звук: *${sName}*\n` +
+          `📡 Статус: *${isOnline ? '🟢 Зараз у грі — увімкнеться за 1-3 секунди!' : '⚪ Зараз офлайн — увімкнеться при запуску гри'}*\n\n` +
+          `Телефон жертви також завібрує від несподіванки 📳`;
+
+        if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+        await sendTg(TOKEN, 'sendMessage', {
+          chat_id: cqChat,
+          text: msg,
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🔄 Увімкнути ще звук', callback_data: `admin:user_sounds_menu:${tId}` }],
+              [{ text: '👤 До картки гравця', callback_data: `admin:check_user:${tId}` }],
+              [{ text: '⬅️ Головне меню', callback_data: 'admin:back' }],
+            ],
+          },
+        });
+        return res.status(200).json({ ok: true });
+      }
+
+      // Відправка звуку всім онлайн гравцям
+      if (action === 'send_sound_all') {
+        const soundKey = targetId;
+        await redis('SET', 'rofl_sound_all', soundKey, 'EX', 45);
+        const sName = ROFL_SOUND_NAMES[soundKey] || soundKey;
+        const msg =
+          `📢 *МАСОВИЙ ЗВУК АКТИВОВАНО!* 🔊💥\n\n` +
+          `🎵 Звук: *${sName}*\n\n` +
+          `🌐 Всі гравці, які зараз у грі або зайдуть протягом 45 секунд, почують цей звук на повну гучність прямо під час тапання! 😂`;
+
+        if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+        await sendTg(TOKEN, 'sendMessage', {
+          chat_id: cqChat,
+          text: msg,
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🔄 Інший звук усім', callback_data: 'admin:all_sounds_menu' }],
+              [{ text: '🎭 До рофл-меню', callback_data: 'admin:menu:rofl' }],
+              [{ text: '⬅️ Головне меню', callback_data: 'admin:back' }],
+            ],
+          },
+        });
         return res.status(200).json({ ok: true });
       }
 
@@ -6101,6 +6354,60 @@ module.exports = async function handler(req, res) {
         text: `✅ *АКАУНТ ${target.display} ВІДНОВЛЕНО!*\n\nДані: ${restoreTypeDesc}.\nГравцю відправлено сповіщення. При наступному вході гра підтягне ці дані.`,
         parse_mode: 'Markdown',
       });
+      return res.status(200).json({ ok: true });
+    }
+
+    // /sound або /rofl <@username|ID|all> [sound_key]
+    if (cmd.startsWith('/sound') || cmd.startsWith('sound') || cmd.startsWith('/rofl') || cmd.startsWith('rofl')) {
+      if (!isAdmin(userId)) return res.status(200).json({ ok: true });
+      const parts = text.trim().split(/\s+/);
+      const targetInput = parts[1];
+      const soundInput = parts[2]?.toLowerCase();
+
+      if (!targetInput) {
+        const menu = await renderRoflMenu();
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, ...menu });
+        return res.status(200).json({ ok: true });
+      }
+
+      if (targetInput.toLowerCase() === 'all' || targetInput.toLowerCase() === 'всім') {
+        if (soundInput && ROFL_SOUND_NAMES[soundInput]) {
+          await redis('SET', 'rofl_sound_all', soundInput, 'EX', 45);
+          await sendTg(TOKEN, 'sendMessage', {
+            chat_id: chatId,
+            text: `📢 *Звук ${ROFL_SOUND_NAMES[soundInput]} активовано для ВСІХ онлайн гравців!* 🔊💥`,
+            parse_mode: 'Markdown',
+          });
+          return res.status(200).json({ ok: true });
+        }
+        const menu = await renderAllSoundsMenu();
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, ...menu });
+        return res.status(200).json({ ok: true });
+      }
+
+      const target = await resolveTargetUser(targetInput);
+      if (!target) {
+        await sendTg(TOKEN, 'sendMessage', {
+          chat_id: chatId,
+          text: `❌ Користувача "${targetInput}" не знайдено в базі.`,
+        });
+        return res.status(200).json({ ok: true });
+      }
+
+      if (soundInput && ROFL_SOUND_NAMES[soundInput]) {
+        await redis('SET', `rofl_sound:${target.id}`, soundInput, 'EX', 180);
+        const isOnlineRaw = await redis('GET', `user_online:${target.id}`);
+        const isOnline = isOnlineRaw?.result === '1';
+        await sendTg(TOKEN, 'sendMessage', {
+          chat_id: chatId,
+          text: `🔊 *Звук ${ROFL_SOUND_NAMES[soundInput]} відправлено для ${target.display}!* ${isOnline ? '🟢 Зараз у грі — увімкнеться за 1-3 сек!' : '⚪ Офлайн — увімкнеться при запуску.'}`,
+          parse_mode: 'Markdown',
+        });
+        return res.status(200).json({ ok: true });
+      }
+
+      const menu = await renderUserSoundsMenu(target.id);
+      await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, ...menu });
       return res.status(200).json({ ok: true });
     }
 

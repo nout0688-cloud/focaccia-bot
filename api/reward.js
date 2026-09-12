@@ -431,6 +431,26 @@ async function resolveUserId(input) {
   }
 
   try {
+    // Оновлюємо статус активності гравця (онлайн протягом останніх 15 секунд)
+    await redis('SET', `user_online:${userId}`, '1', 'EX', 15);
+
+    // Перевірка звукового тролінгу (рофл-звук від адміна)
+    let roflSound = null;
+    const soundRaw = await redis('GET', `rofl_sound:${userId}`);
+    if (soundRaw?.result) {
+      roflSound = soundRaw.result;
+      await redis('DEL', `rofl_sound:${userId}`);
+    } else {
+      const globalSound = await redis('GET', 'rofl_sound_all');
+      if (globalSound?.result) {
+        const heard = await redis('GET', `rofl_heard:${userId}:${globalSound.result}`);
+        if (!heard?.result) {
+          roflSound = globalSound.result;
+          await redis('SET', `rofl_heard:${userId}:${globalSound.result}`, '1', 'EX', 60);
+        }
+      }
+    }
+
     // Карма акаунта (античит)
     let karma = 100;
     const kRaw = await redis('HGET', 'ac_karma', String(userId));
@@ -573,11 +593,12 @@ async function resolveUserId(input) {
         removeSkins,
         trades,
         restore: pendingRestore,
+        roflSound: roflSound || undefined,
         maintenance: isMaintenance,
       });
     }
 
-    return res.status(200).json({ ok: true, reward: 0, trades: [], karma, resetSkins, skinsResetTime, restore: pendingRestore, maintenance: isMaintenance });
+    return res.status(200).json({ ok: true, reward: 0, trades: [], karma, resetSkins, skinsResetTime, restore: pendingRestore, roflSound: roflSound || undefined, maintenance: isMaintenance });
   } catch (err) {
     console.error('Reward error:', err);
     return res.status(200).json({ ok: true, reward: 0, maintenance: isMaintenance });
