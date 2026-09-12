@@ -4711,10 +4711,10 @@ module.exports = async function handler(req, res) {
       const parts = text.trim().split(/\s+/);
       const startParam = parts[1] || '';
 
-      // Deep link to Trade: /start trade_tr_... or /start tr_...
-      if (startParam.startsWith('trade_') || startParam.startsWith('tr_')) {
-        const tradeId = startParam.startsWith('trade_') ? startParam.replace('trade_', '') : startParam;
-        const tradeUrl = `https://nout0688-cloud.github.io/focaccia-clicker/?v=1.4.0&trade=${tradeId}`;
+      // Deep link to Trade: /start trade_tr_... or /start tr_... or /start trade
+      if (startParam.startsWith('trade_') || startParam.startsWith('tr_') || startParam === 'trade' || startParam === 'trade_lobby') {
+        const tradeId = (startParam === 'trade' || startParam === 'trade_lobby') ? 'lobby' : (startParam.startsWith('trade_') ? startParam.replace('trade_', '') : startParam);
+        const tradeUrl = `https://nout0688-cloud.github.io/focaccia-clicker/?v=${Date.now()}&trade=${tradeId}`;
         await sendTg(TOKEN, 'sendMessage', {
           chat_id: chatId,
           text: `🤝 *Запрошення до безпечного обміну (Трейд)*\n\nТебе запросили у кімнату обміну! Обмінюйся фокачами 🫓, алмазами 💎 та рідкісними скінами.\n\nНатисни кнопку нижче, щоб відкрити кімнату:`,
@@ -4776,7 +4776,7 @@ module.exports = async function handler(req, res) {
       if (msg.message_id) {
         scheduleMessageDeletion(chatId, msg.message_id, DUEL_MSG_CLEANUP_TTL).catch(() => {});
       }
-      const duelLobbyUrl = 'https://nout0688-cloud.github.io/focaccia-clicker/?v=1.4.0&duel=lobby';
+      const duelLobbyUrl = `https://nout0688-cloud.github.io/focaccia-clicker/?v=${Date.now()}&duel=lobby`;
       await sendDuelTg(TOKEN, 'sendMessage', {
         chat_id: chatId,
         text: '⚔️ *Дуелі Фокача Клікер (Mini App)*\n\nБийся 1 на 1 у реальному часі на фокачі 🫓 або алмази 💎!\nОбирай суперника, валюту, ставку, ціль та час раунду прямо в окремому міні-аппі.',
@@ -4795,12 +4795,14 @@ module.exports = async function handler(req, res) {
       if (msg.message_id) {
         scheduleMessageDeletion(chatId, msg.message_id, DUEL_MSG_CLEANUP_TTL).catch(() => {});
       }
+      const tradeLobbyUrl = `https://nout0688-cloud.github.io/focaccia-clicker/?v=${Date.now()}&trade=lobby`;
       await sendDuelTg(TOKEN, 'sendMessage', {
         chat_id: chatId,
         text: '🤝 *Меню безпечних Трейдів*\nОбмінюйся фокачами 🫓, алмазами 💎 та скінами 🎨 в окремому міні-аппі!',
         parse_mode: 'Markdown',
         reply_markup: {
           inline_keyboard: [
+            [{ text: '🤝 Відкрити Трейди (Mini App)', web_app: { url: tradeLobbyUrl } }],
             [{ text: '👥 Зі списку гравців', callback_data: 'trade:players' }],
             [{ text: '🔍 За юзернеймом', callback_data: 'trade:byname' }],
             [{ text: '🔗 Створити відкритий трейд', callback_data: 'trade:open' }],

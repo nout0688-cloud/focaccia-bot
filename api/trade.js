@@ -15,7 +15,7 @@
  */
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const TRADE_SITE = 'https://nout0688-cloud.github.io/focaccia-clicker/?v=1.4.0&trade=';
+const TRADE_SITE = 'https://nout0688-cloud.github.io/focaccia-clicker/?v=';
 const TRADE_TTL = 30 * 60; // 30 хвилин у Redis
 
 async function redis(...args) {
@@ -276,7 +276,7 @@ module.exports = async function handler(req, res) {
       };
 
       await saveTrade(trade);
-      const url = `${TRADE_SITE}${tradeId}`;
+      const url = `${TRADE_SITE}${Date.now()}&trade=${tradeId}`;
 
       // Якщо вказано конкретного отримувача — надсилаємо інвайт у Telegram
       if (to) {
@@ -331,9 +331,12 @@ module.exports = async function handler(req, res) {
     let isP1 = String(trade.p1?.id) === String(userId);
     let isP2 = Boolean(trade.p2 && String(trade.p2.id) === String(userId));
     const isP2Empty = !trade.p2 || !trade.p2.id || String(trade.p2.id) === 'null' || String(trade.p2.id) === 'undefined' || String(trade.p2.id) === '0';
+    // Дозволяємо приєднання, якщо слот p2 порожній або партнер ще нічого не пропонував/не зафіксував (захист від Telegram prefetch / guest ID race)
+    const isP2Clean = !trade.p2Locked && !trade.p2Confirmed && (!trade.p2Offer || (trade.p2Offer.focaccia === 0 && trade.p2Offer.diamonds === 0 && (!trade.p2Offer.skins || trade.p2Offer.skins.length === 0)));
+    const isP2SlotAvailable = isP2Empty || (!trade.p2Seen) || (isP2Clean && (!trade.p2.name || trade.p2.name === 'Гравець' || trade.p2.name === ''));
 
-    // Приєднання до відкритого посилання (open trade), якщо p2 ще немає і гравець не p1
-    if (!isP1 && !isP2 && isP2Empty) {
+    // Приєднання до відкритого посилання (open trade), якщо p2 ще немає або слот вільний і гравець не p1
+    if (!isP1 && !isP2 && isP2SlotAvailable) {
       trade.p2 = {
         id: String(userId),
         name: String(body.name || 'Гравець').slice(0, 24),
