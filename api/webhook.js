@@ -3062,6 +3062,12 @@ module.exports = async function handler(req, res) {
     if (TOKEN) {
       await checkScheduledContests(TOKEN).catch(() => {});
       await checkExpiredContests(TOKEN).catch(() => {});
+      try {
+        const meRes = await fetch(`https://api.telegram.org/bot${TOKEN}/getMe`).then(r => r.json());
+        return res.status(200).json({ ok: true, msg: '🫓 Focaccia bot is alive!', bot: meRes.result });
+      } catch (e) {
+        return res.status(200).json({ ok: true, msg: '🫓 Focaccia bot is alive!', error: e.message });
+      }
     }
     return res.status(200).json({ ok: true, msg: '🫓 Focaccia bot is alive!' });
   }
