@@ -184,6 +184,7 @@ module.exports = async function handler(req, res) {
 
       const total = Math.max(0, Math.min(Number(body.total) || 0, 1e24));
       const prestige = Math.max(0, Math.min(parseInt(body.prestige, 10) || 0, 1e6));
+      const lastRebirthTime = Math.max(0, parseInt(body.lastRebirthTime, 10) || 0);
       const diamonds = Math.max(0, Math.min(parseInt(body.diamonds, 10) || 0, 1e9));
       const clicks = Math.max(0, Math.min(Math.floor(Number(body.clicks)) || 0, 1e9));
       const name = String(body.name || 'Гравець')
@@ -193,6 +194,9 @@ module.exports = async function handler(req, res) {
       const username = String(body.username || '').replace(/[^a-zA-Z0-9_]/g, '').slice(0, 32);
 
       const now = Date.now();
+      if (lastRebirthTime > 0) {
+        await redis('SET', `user_rebirth_time:${userId}`, String(lastRebirthTime));
+      }
       const prevRaw = await redis('HGET', 'leaderboard', userId);
       let prev = null;
       if (prevRaw?.result) {
@@ -320,6 +324,7 @@ module.exports = async function handler(req, res) {
         fr: frame,
         cl: color,
         av: avatar,
+        rbt: lastRebirthTime || prev?.rbt || 0,
         ts: now
       }));
 

@@ -71,6 +71,47 @@ async function setUserBalance(userId, f, d) {
   await redis('HSET', 'user_balance', uid, JSON.stringify({ f, d, ts: Date.now() }));
 }
 
+const REBIRTH_TRADE_LOCK_MS = 5 * 24 * 60 * 60 * 1000; // 5 days
+
+async function getUserRebirthTime(userId) {
+  if (!userId) return 0;
+  const uid = String(userId);
+  const raw = await redis('GET', `user_rebirth_time:${uid}`);
+  if (raw?.result) {
+    const t = Number(raw.result) || 0;
+    if (t > 0) return t;
+  }
+  const lbData = await redis('HGET', 'leaderboard', uid);
+  if (lbData?.result) {
+    try {
+      const lbObj = JSON.parse(lbData.result);
+      if (typeof lbObj.rbt === 'number' && lbObj.rbt > 0) return lbObj.rbt;
+    } catch {}
+  }
+  return 0;
+}
+
+async function setUserRebirthTime(userId, timestamp) {
+  if (!userId || !timestamp) return;
+  const uid = String(userId);
+  const t = Number(timestamp) || 0;
+  if (t > 0) {
+    await redis('SET', `user_rebirth_time:${uid}`, String(t));
+  }
+}
+
+async function checkUserRebirthLock(userId, clientTimestamp = 0) {
+  const serverTime = await getUserRebirthTime(userId);
+  const effectiveTime = Math.max(serverTime, Number(clientTimestamp) || 0);
+  if (effectiveTime > 0) {
+    const elapsed = Date.now() - effectiveTime;
+    if (elapsed < REBIRTH_TRADE_LOCK_MS) {
+      return { locked: true, remainingMs: REBIRTH_TRADE_LOCK_MS - elapsed };
+    }
+  }
+  return { locked: false, remainingMs: 0 };
+}
+
 async function getTrade(tradeId) {
   const raw = await redis('GET', `trade:${tradeId}`);
   if (!raw?.result) return null;
@@ -238,7 +279,8 @@ module.exports = async function handler(req, res) {
       const userId = String(body.userId || req.query.userId || '');
       if (!userId) return res.status(400).json({ ok: false, error: 'no_userId' });
       const bal = await getUserBalance(userId);
-      return res.status(200).json({ ok: true, focaccia: bal.f, diamonds: bal.d });
+      const rbt = await getUserRebirthTime(userId);
+      return res.status(200).json({ ok: true, focaccia: bal.f, diamonds: bal.d, lastRebirthTime: rbt });
     }
 
     // 2. Створити сесію трейду
@@ -254,6 +296,22 @@ module.exports = async function handler(req, res) {
       }
       if (to && String(from) === String(to)) {
         return res.status(400).json({ ok: false, error: 'self_trade_not_allowed' });
+      }
+
+      // Перевірка 5-денного кулдауну після ребіртху для ініціатора трейду
+      const clientRbt = Number(body.clientLastRebirthTime) || 0;
+      if (clientRbt > 0) await setUserRebirthTime(from, clientRbt);
+      const fromLock = await checkUserRebirthLock(from, clientRbt);
+      if (fromLock.locked) {
+        return res.status(200).json({ ok: false, error: 'rebirth_locked', remainingMs: fromLock.remainingMs });
+      }
+
+      // Перевірка кулдауну для запрошеного партнера (якщо вказано ID)
+      if (to) {
+        const toLock = await checkUserRebirthLock(to);
+        if (toLock.locked) {
+          return res.status(200).json({ ok: false, error: 'recipient_rebirth_locked', remainingMs: toLock.remainingMs });
+        }
       }
 
       const tradeId = `tr_${now.toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
@@ -337,6 +395,13 @@ module.exports = async function handler(req, res) {
 
     // Приєднання до відкритого посилання (open trade), якщо p2 ще немає або слот вільний і гравець не p1
     if (!isP1 && !isP2 && isP2SlotAvailable) {
+      const clientRbt = Number(body.clientLastRebirthTime) || 0;
+      if (clientRbt > 0) await setUserRebirthTime(userId, clientRbt);
+      const lockCheck = await checkUserRebirthLock(userId, clientRbt);
+      if (lockCheck.locked) {
+        return res.status(200).json({ ok: false, error: 'rebirth_locked', remainingMs: lockCheck.remainingMs });
+      }
+
       trade.p2 = {
         id: String(userId),
         name: String(body.name || 'Гравець').slice(0, 24),
@@ -375,6 +440,14 @@ module.exports = async function handler(req, res) {
       const oppConfirmed = isP1 ? trade.p2Confirmed : trade.p1Confirmed;
       const oppSeen = isP1 ? trade.p2Seen : trade.p1Seen;
 
+      let oppRebirthLocked = false;
+      let oppRebirthRemainingMs = 0;
+      if (opp?.id) {
+        const oppLock = await checkUserRebirthLock(opp.id);
+        oppRebirthLocked = oppLock.locked;
+        oppRebirthRemainingMs = oppLock.remainingMs;
+      }
+
       return res.status(200).json({
         ok: true,
         stage: trade.stage,
@@ -397,6 +470,8 @@ module.exports = async function handler(req, res) {
           locked: oppLocked,
           confirmed: oppConfirmed,
           online: (now - oppSeen) < 10000,
+          rebirthLocked: oppRebirthLocked,
+          rebirthRemainingMs: oppRebirthRemainingMs,
         } : null,
       });
     }
@@ -455,6 +530,14 @@ module.exports = async function handler(req, res) {
       const oppConfirmed = isP1 ? trade.p2Confirmed : trade.p1Confirmed;
       const oppSeen = isP1 ? trade.p2Seen : trade.p1Seen;
 
+      let oppRebirthLocked = false;
+      let oppRebirthRemainingMs = 0;
+      if (opp?.id) {
+        const oppLock = await checkUserRebirthLock(opp.id);
+        oppRebirthLocked = oppLock.locked;
+        oppRebirthRemainingMs = oppLock.remainingMs;
+      }
+
       return res.status(200).json({
         ok: true,
         stage: trade.stage,
@@ -477,6 +560,8 @@ module.exports = async function handler(req, res) {
           locked: oppLocked,
           confirmed: oppConfirmed,
           online: (now - oppSeen) < 10000,
+          rebirthLocked: oppRebirthLocked,
+          rebirthRemainingMs: oppRebirthRemainingMs,
         } : null,
       });
     }
@@ -484,6 +569,13 @@ module.exports = async function handler(req, res) {
     // 4. Зафіксувати або розблокувати пропозицію (Lock)
     if (action === 'lock') {
       if (trade.stage !== 'active') return res.status(200).json({ ok: false, error: 'trade_not_active' });
+      const clientRbt = Number(body.clientLastRebirthTime) || 0;
+      if (clientRbt > 0) await setUserRebirthTime(userId, clientRbt);
+      const lockCheck = await checkUserRebirthLock(userId, clientRbt);
+      if (lockCheck.locked) {
+        return res.status(200).json({ ok: false, error: 'rebirth_locked', remainingMs: lockCheck.remainingMs });
+      }
+
       const wantLock = body.locked === true;
       if (isP1) trade.p1Locked = wantLock;
       else trade.p2Locked = wantLock;
@@ -503,6 +595,21 @@ module.exports = async function handler(req, res) {
       if (trade.stage !== 'active') return res.status(200).json({ ok: false, error: 'trade_not_active' });
       if (!trade.p1Locked || !trade.p2Locked) {
         return res.status(200).json({ ok: false, error: 'both_must_lock_first' });
+      }
+
+      const clientRbt = Number(body.clientLastRebirthTime) || 0;
+      if (clientRbt > 0) await setUserRebirthTime(userId, clientRbt);
+
+      // Перевірка 5-денного кулдауну після ребіртху для обох учасників
+      const p1Lock = await checkUserRebirthLock(trade.p1.id, isP1 ? clientRbt : 0);
+      if (p1Lock.locked) {
+        return res.status(200).json({ ok: false, error: 'rebirth_locked', remainingMs: p1Lock.remainingMs });
+      }
+      if (trade.p2?.id) {
+        const p2Lock = await checkUserRebirthLock(trade.p2.id, isP2 ? clientRbt : 0);
+        if (p2Lock.locked) {
+          return res.status(200).json({ ok: false, error: 'rebirth_locked', remainingMs: p2Lock.remainingMs });
+        }
       }
 
       if (isP1) trade.p1Confirmed = true;

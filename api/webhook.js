@@ -3500,6 +3500,20 @@ module.exports = async function handler(req, res) {
               text: `🤝 Запрошення до трейду надіслано гравцю!\nНатисни кнопку нижче, щоб відкрити кімнату обміну:`,
               reply_markup: kb,
             });
+          } else if (data?.error === 'rebirth_locked') {
+            const rem = data.remainingMs || 0;
+            const days = Math.floor(rem / (24 * 3600 * 1000));
+            const hours = Math.floor((rem % (24 * 3600 * 1000)) / (3600 * 1000));
+            await sendDuelTg(TOKEN, 'sendMessage', {
+              chat_id: Number(cqChat),
+              text: `⏳ *Трейди заблоковано після ребіртху!*\n\nПісля останнього переродження має пройти 5 днів для запобігання нечесному переливу ресурсів.\nЗалишилося: *${days} дн. ${hours} год.*`,
+              parse_mode: 'Markdown',
+            });
+          } else if (data?.error === 'recipient_rebirth_locked') {
+            await sendDuelTg(TOKEN, 'sendMessage', {
+              chat_id: Number(cqChat),
+              text: `⏳ *Партнер не може торгувати!*\n\nЦей гравець нещодавно зробив ребіртх. Трейди для нього заблоковані на 5 днів.`,
+            });
           } else {
             await sendDuelTg(TOKEN, 'sendMessage', { chat_id: Number(cqChat), text: '❌ Не вдалося створити трейд. Спробуй пізніше.' });
           }
@@ -3531,6 +3545,15 @@ module.exports = async function handler(req, res) {
               text: `🔗 *Відкритий трейд створено!*\n\nБудь-який гравець, який перейде за цим посиланням, стане твоїм партнером по обміну:\n\`${data.url}\``,
               parse_mode: 'Markdown',
               reply_markup: kb,
+            });
+          } else if (data?.error === 'rebirth_locked') {
+            const rem = data.remainingMs || 0;
+            const days = Math.floor(rem / (24 * 3600 * 1000));
+            const hours = Math.floor((rem % (24 * 3600 * 1000)) / (3600 * 1000));
+            await sendDuelTg(TOKEN, 'sendMessage', {
+              chat_id: Number(cqChat),
+              text: `⏳ *Трейди заблоковано після ребіртху!*\n\nПісля останнього переродження має пройти 5 днів для запобігання нечесному переливу ресурсів.\nЗалишилося: *${days} дн. ${hours} год.*`,
+              parse_mode: 'Markdown',
             });
           } else {
             await sendDuelTg(TOKEN, 'sendMessage', { chat_id: Number(cqChat), text: '❌ Не вдалося створити відкритий трейд.' });
@@ -4628,6 +4651,20 @@ module.exports = async function handler(req, res) {
           text: `🤝 Запрошення до трейду надіслано ${target.shortDisplay}!\nНатисни кнопку нижче, щоб відкрити кімнату обміну:`,
           reply_markup: kb,
         });
+      } else if (tData?.error === 'rebirth_locked') {
+        const rem = tData.remainingMs || 0;
+        const days = Math.floor(rem / (24 * 3600 * 1000));
+        const hours = Math.floor((rem % (24 * 3600 * 1000)) / (3600 * 1000));
+        await sendDuelTg(TOKEN, 'sendMessage', {
+          chat_id: Number(chatId),
+          text: `⏳ *Трейди заблоковано після ребіртху!*\n\nПісля останнього переродження має пройти 5 днів для запобігання нечесному переливу ресурсів.\nЗалишилося: *${days} дн. ${hours} год.*`,
+          parse_mode: 'Markdown',
+        });
+      } else if (tData?.error === 'recipient_rebirth_locked') {
+        await sendDuelTg(TOKEN, 'sendMessage', {
+          chat_id: Number(chatId),
+          text: `⏳ *Партнер не може торгувати!*\n\nГравець ${target.shortDisplay} нещодавно зробив ребіртх. Трейди для нього заблоковані на 5 днів.`,
+        });
       } else {
         await sendDuelTg(TOKEN, 'sendMessage', { chat_id: Number(chatId), text: '❌ Не вдалося створити трейд. Спробуй пізніше.' });
       }
@@ -4795,6 +4832,22 @@ module.exports = async function handler(req, res) {
       if (msg.message_id) {
         scheduleMessageDeletion(chatId, msg.message_id, DUEL_MSG_CLEANUP_TTL).catch(() => {});
       }
+
+      // Перевірка 5-денного кулдауну після ребіртху
+      const rbtRaw = await redis('GET', `user_rebirth_time:${chatId}`);
+      const rbt = rbtRaw?.result ? Number(rbtRaw.result) : 0;
+      if (rbt > 0 && Date.now() - rbt < 5 * 24 * 60 * 60 * 1000) {
+        const rem = 5 * 24 * 60 * 60 * 1000 - (Date.now() - rbt);
+        const days = Math.floor(rem / (24 * 3600 * 1000));
+        const hours = Math.floor((rem % (24 * 3600 * 1000)) / (3600 * 1000));
+        await sendDuelTg(TOKEN, 'sendMessage', {
+          chat_id: chatId,
+          text: `⏳ *Трейди заблоковано після ребіртху!*\n\nПісля останнього переродження має пройти 5 днів для запобігання нечесному переливу ресурсів.\nЗалишилося: *${days} дн. ${hours} год.*`,
+          parse_mode: 'Markdown',
+        });
+        return res.status(200).json({ ok: true });
+      }
+
       const tradeLobbyUrl = `https://nout0688-cloud.github.io/focaccia-clicker/?v=${Date.now()}&trade=lobby`;
       await sendDuelTg(TOKEN, 'sendMessage', {
         chat_id: chatId,
