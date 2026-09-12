@@ -293,9 +293,13 @@ module.exports = async function handler(req, res) {
 
       // 3. Заморозка та анулювання накручених даних при Karma < 25 («Тінь бабусі») або чітерстві
       const frozen = (karma < 25 || cheated) && prev && typeof prev.t === 'number';
-      const storedTotal = frozen ? prev.t : total;
-      // Накручені кліки НЕ зараховуються до лідерборду!
-      const storedClicks = frozen ? (prev?.k || 0) : clicks;
+      // Захист від втрати рекордів: якщо гравець зробив переродження або скинув сесію, рекорд не зникає з лідерборду
+      const maxTotal = prev && typeof prev.t === 'number' ? Math.max(prev.t, total) : total;
+      const storedTotal = frozen ? prev.t : maxTotal;
+      // Накручені кліки НЕ зараховуються до лідерборду, але збережений максимум кліків зберігається
+      const maxClicks = prev && typeof prev.k === 'number' ? Math.max(prev.k, clicks) : clicks;
+      const storedClicks = frozen ? (prev?.k || 0) : maxClicks;
+      const maxPrestige = prev && typeof prev.p === 'number' ? Math.max(prev.p, prestige) : prestige;
       const bosses = Math.max(0, Math.min(parseInt(body.bosses, 10) || 0, 1e6));
       const achievements = Math.max(0, Math.min(parseInt(body.achievements, 10) || 0, 100));
       const showcase = Array.isArray(body.showcase) ? body.showcase.slice(0, 3) : (prev?.sc || ['clicks', 'total', 'diamonds']);
@@ -307,7 +311,7 @@ module.exports = async function handler(req, res) {
         n: name,
         u: username,
         t: storedTotal,
-        p: prestige,
+        p: maxPrestige,
         d: diamonds,
         k: storedClicks,
         b: bosses,
@@ -359,11 +363,14 @@ module.exports = async function handler(req, res) {
         await redis('HSET', 'user_balance', userId, JSON.stringify({ f: finalFoc, d: finalDia, ts: now }));
       }
 
-      // Рахуємо місце гравця одразу після оновлення для всіх 3 категорій
-      const allPlayers = parsePlayers(await redis('HGETALL', 'leaderboard'), null, 'total');
-      const rankTotal = allPlayers.findIndex((p) => p.id === userId) + 1;
-      const rankDiamonds = [...allPlayers].sort((a, b) => (b.diamonds - a.diamonds) || (b.total - a.total)).findIndex((p) => p.id === userId) + 1;
-      const rankRebirth = [...allPlayers].sort((a, b) => (b.prestige - a.prestige) || (b.total - a.total)).findIndex((p) => p.id === userId) + 1;
+      // Рахуємо місце гравця одразу після оновлення для всіх 3 категорій (1 спільний HGETALL)
+      const lbRaw = await redis('HGETALL', 'leaderboard');
+      const allPlayersTotal = parsePlayers(lbRaw, null, 'total');
+      const rankTotal = allPlayersTotal.findIndex((p) => p.id === userId) + 1;
+      const allPlayersDiamonds = parsePlayers(lbRaw, null, 'diamonds');
+      const rankDiamonds = allPlayersDiamonds.findIndex((p) => p.id === userId) + 1;
+      const allPlayersRebirth = parsePlayers(lbRaw, null, 'rebirth');
+      const rankRebirth = allPlayersRebirth.findIndex((p) => p.id === userId) + 1;
 
       return res.status(200).json({
         ok: true,
@@ -380,9 +387,11 @@ module.exports = async function handler(req, res) {
 
     // ===== GET — топ гравців (з позначками ⚠️) =====
     let sortBy = 'total';
+    let reqUserId = '';
     try {
       const urlObj = new URL(req.url, 'http://localhost');
       sortBy = req.query?.sort || req.query?.category || urlObj.searchParams.get('sort') || urlObj.searchParams.get('category') || 'total';
+      reqUserId = String(req.query?.userId || urlObj.searchParams.get('userId') || '');
     } catch { /* ignore */ }
 
     const [activeData, lbData, balancesData] = await Promise.all([
@@ -408,10 +417,31 @@ module.exports = async function handler(req, res) {
       }
     }
 
-    const players = parsePlayers(lbData, balanceMap, sortBy)
-      .slice(0, 50)
+    const allSorted = parsePlayers(lbData, balanceMap, sortBy)
       .map((p) => ({ ...p, flag: (karmaMap.get(p.id) ?? 100) < 50 }));
-    return res.status(200).json({ ok: true, players, sortBy });
+    const players = allSorted.slice(0, 50);
+
+    let userRank = null;
+    let userRanks = null;
+    let myPlayer = null;
+
+    if (reqUserId) {
+      const idx = allSorted.findIndex((p) => p.id === reqUserId);
+      if (idx >= 0) {
+        userRank = idx + 1;
+        myPlayer = allSorted[idx];
+      }
+      const allTotal = sortBy === 'total' ? allSorted : parsePlayers(lbData, balanceMap, 'total');
+      const allDiamonds = sortBy === 'diamonds' ? allSorted : parsePlayers(lbData, balanceMap, 'diamonds');
+      const allRebirth = (sortBy === 'rebirth' || sortBy === 'prestige') ? allSorted : parsePlayers(lbData, balanceMap, 'rebirth');
+      userRanks = {
+        total: (allTotal.findIndex((p) => p.id === reqUserId) + 1) || null,
+        diamonds: (allDiamonds.findIndex((p) => p.id === reqUserId) + 1) || null,
+        rebirth: (allRebirth.findIndex((p) => p.id === reqUserId) + 1) || null,
+      };
+    }
+
+    return res.status(200).json({ ok: true, players, sortBy, userRank, userRanks, myPlayer });
   } catch (err) {
     console.error('Leaderboard error:', err);
     if (req.method === 'POST') return res.status(200).json({ ok: false });
