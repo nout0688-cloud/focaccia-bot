@@ -622,8 +622,25 @@ function renderDurationMenu(draft) {
   };
 }
 
+async function getContestParticipantCount(contestId) {
+  try {
+    const cardRes = await redis('SCARD', 'contest:' + contestId + ':participants');
+    if (typeof cardRes?.result === 'number' && cardRes.result >= 0) {
+      return cardRes.result;
+    }
+    if (cardRes?.result !== undefined && cardRes?.result !== null && !isNaN(parseInt(cardRes.result, 10))) {
+      return parseInt(cardRes.result, 10);
+    }
+    const memRes = await redis('SMEMBERS', 'contest:' + contestId + ':participants');
+    if (Array.isArray(memRes?.result)) {
+      return memRes.result.length;
+    }
+  } catch {}
+  return 0;
+}
+
 async function handleContestJoin(TOKEN, contestId, fromUser) {
-  if (!contestId || !fromUser?.id) return { msg: '❌ Помилка запиту' };
+  if (!contestId || !fromUser?.id) return { msg: '❌ Помилка запиту', alert: true };
   const userId = String(fromUser.id);
   const name = fromUser.first_name || 'Гравець';
   const username = fromUser.username || '';
@@ -645,15 +662,20 @@ async function handleContestJoin(TOKEN, contestId, fromUser) {
     return { msg: '⏳ Час вийшов! Зараз підбиваються підсумки...', alert: true };
   }
 
-  const addRes = await redis('SADD', 'contest:' + contestId + ':participants', userId);
-  const wasAdded = addRes?.result === 1;
+  const pRes = await redis('SMEMBERS', 'contest:' + contestId + ':participants');
+  let participants = Array.isArray(pRes?.result) ? pRes.result.map(String) : [];
+  const wasAlready = participants.includes(userId);
+
+  if (!wasAlready) {
+    await redis('SADD', 'contest:' + contestId + ':participants', userId);
+    participants.push(userId);
+  }
 
   await redis('HSET', 'contest:' + contestId + ':users', userId, JSON.stringify({ name, username }));
 
-  const cardRes = await redis('SCARD', 'contest:' + contestId + ':participants');
-  const count = cardRes?.result || 1;
+  const count = Math.max(1, participants.length);
 
-  if (wasAdded) {
+  if (!wasAlready) {
     return {
       msg: '🎉 Вітаємо! Ти береш участь у розіграші! Удачі 🍀',
       alert: false,
@@ -738,7 +760,7 @@ async function publishContest(TOKEN, adminChatId, draft) {
 
   const contestMarkup = {
     inline_keyboard: [
-      [{ text: '🎉 Взяти участь (0)', callback_data: `concurs:join:${contestId}` }],
+      [{ text: '🎉 Взяти участь', callback_data: `concurs:join:${contestId}` }],
       [{ text: '🫓 Відкрити Фокача Клікер', web_app: { url: WEBAPP_URL } }],
     ],
   };
@@ -970,7 +992,7 @@ async function launchScheduledContest(TOKEN, contestId, cObj) {
 
   const contestMarkup = {
     inline_keyboard: [
-      [{ text: '🎉 Взяти участь (0)', callback_data: `concurs:join:${contestId}` }],
+      [{ text: '🎉 Взяти участь', callback_data: `concurs:join:${contestId}` }],
       [{ text: '🫓 Відкрити Фокача Клікер', web_app: { url: WEBAPP_URL } }],
     ],
   };
@@ -1529,8 +1551,7 @@ async function renderContestsAdminMenu(page = 0) {
         const c = JSON.parse(raw);
         const isExpired = c.endTime && Date.now() >= c.endTime;
         if (c.status === 'active' && !isExpired) {
-          const pCard = await redis('SCARD', 'contest:' + cId + ':participants');
-          const pCount = pCard?.result || 0;
+          const pCount = await getContestParticipantCount(cId);
           activeContests.push({ cId, c, pCount });
           activeIds.push(cId);
         } else {
@@ -1606,8 +1627,7 @@ async function renderContestsAdminMenu(page = 0) {
       if (raw) {
         try {
           const c = JSON.parse(raw);
-          const pCard = await redis('SCARD', 'contest:' + cId + ':participants');
-          const pCount = pCard?.result || 0;
+          const pCount = await getContestParticipantCount(cId);
           const prize = formatContestCur(c.cur, c.amount);
           const isFin = c.status === 'finished';
           const statusBadge = isFin ? '🏁 Завершено' : '🛑 Скасовано';
@@ -3893,14 +3913,6 @@ module.exports = async function handler(req, res) {
       const parts = cq.data.split(':');
       const action = parts[1];
 
-      try {
-        await fetch(`https://api.telegram.org/bot${TOKEN}/answerCallbackQuery`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ callback_query_id: cq.id }),
-        });
-      } catch { /* ignore */ }
-
       // 1. Участь у конкурсі (доступно будь-якому гравцю)
       if (action === 'join') {
         const contestId = parts[2];
@@ -3920,7 +3932,7 @@ module.exports = async function handler(req, res) {
         if (joinRes.updatedCount !== undefined && cqMsgId) {
           try {
             await sendTg(TOKEN, 'editMessageReplyMarkup', {
-              chat_id: cqChat,
+              chat_id: Number(cqChat) || cqChat,
               message_id: cqMsgId,
               reply_markup: {
                 inline_keyboard: [
@@ -3935,6 +3947,14 @@ module.exports = async function handler(req, res) {
       }
 
       // Решта дій — ТІЛЬКИ ДЛЯ АДМІНА
+      try {
+        await fetch(`https://api.telegram.org/bot${TOKEN}/answerCallbackQuery`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ callback_query_id: cq.id }),
+        });
+      } catch { /* ignore */ }
+
       if (!isAdmin(cq.from.id)) {
         return res.status(200).json({ ok: true });
       }
@@ -6749,8 +6769,7 @@ module.exports = async function handler(req, res) {
           if (!cRaw?.result) continue;
           try {
             const cObj = JSON.parse(cRaw.result);
-            const pCard = await redis('SCARD', 'contest:' + cId + ':participants');
-            const pCount = pCard?.result || 0;
+            const pCount = await getContestParticipantCount(cId);
             const curFmt = formatContestCur(cObj.cur, cObj.amount);
             const endFmt = formatKyivDate(cObj.endTime);
             const msLeft = cObj.endTime - Date.now();
