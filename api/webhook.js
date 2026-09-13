@@ -3669,12 +3669,12 @@ module.exports = async function handler(req, res) {
         });
         const data = await apiRes.json();
         if (!data.ok) {
-          await sendDuelTg(TOKEN, 'sendMessage', { chat_id: Number(cqChat), text: '⏱ Время вышло — дуэль отменена.' });
+          await sendDuelTg(TOKEN, 'sendMessage', { chat_id: Number(cqChat), text: '⏱ Час вийшов — дуель скасовано.' });
         }
         return res.status(200).json({ ok: true });
       }
 
-      // отклонить вызов
+      // відхилити виклик
       if (dAction === 'decline' && dArg) {
         const host = req.headers.host || 'focaccia-bot.vercel.app';
         await fetch(`https://${host}/api/duel`, {
@@ -3682,6 +3682,15 @@ module.exports = async function handler(req, res) {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action: 'decline', duelId: dArg, userId: cqChat }),
         });
+        if (cq.message?.message_id && cqChat) {
+          try {
+            await sendTg(TOKEN, 'editMessageText', {
+              chat_id: Number(cqChat),
+              message_id: cq.message.message_id,
+              text: '❌ Виклик на дуель відхилено.',
+            });
+          } catch {}
+        }
         return res.status(200).json({ ok: true });
       }
 

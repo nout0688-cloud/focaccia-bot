@@ -20,7 +20,7 @@
 const GOAL_DEFAULT = 100;
 const GOAL_MIN = 10;
 const GOAL_MAX = 100000;
-const MAX_RATE = 15;                // тапов/с — физический предел
+const MAX_RATE = 22;                // тапов/с — верхня межа людини (двома пальцями)
 const RATE_VIOLATIONS = 3;          // страйков темпа → чит-финиш
 const PAUSE_MS = 30 * 1000;         // выход соперника → пауза → нокаут
 const DUEL_LIMIT = 15 * 60 * 1000;  // максимальная длительность
@@ -140,20 +140,42 @@ async function getUserBalance(userId, cur) {
     try {
       const bObj = JSON.parse(balData.result);
       const val = cur === 'gem' ? Number(bObj.d) : Number(bObj.f);
-      if (!isNaN(val) && val > 0) bal = val;
+      if (!isNaN(val) && val >= 0) bal = val;
     } catch { /* fallback */ }
   }
-  // Fallback: перевіряємо leaderboard hash (якщо баланс фокач ще не репортився або 0)
+  // Fallback: перевіряємо leaderboard hash (якщо баланс ще не репортився або 0)
   const lbData = await redis('HGET', 'leaderboard', uid);
   if (lbData?.result) {
     try {
       const lbObj = JSON.parse(lbData.result);
-      if (cur === 'foc' && typeof lbObj.t === 'number') {
-        bal = Math.max(bal || 0, lbObj.t);
+      if (cur === 'foc') {
+        const fVal = typeof lbObj.f === 'number' ? lbObj.f : (typeof lbObj.t === 'number' ? lbObj.t : null);
+        if (fVal !== null) bal = Math.max(bal || 0, fVal);
+      } else if (cur === 'gem') {
+        if (typeof lbObj.d === 'number') bal = Math.max(bal || 0, lbObj.d);
       }
     } catch { /* fallback */ }
   }
+  // Fallback: останній збережений знімок гравця
+  if (bal === null) {
+    const snap = await redis('GET', `user_latest_snapshot:${uid}`);
+    if (snap?.result) {
+      try {
+        const sObj = JSON.parse(snap.result);
+        if (cur === 'gem' && typeof sObj.diamonds === 'number') bal = sObj.diamonds;
+        else if (cur === 'foc' && typeof sObj.focaccia === 'number') bal = sObj.focaccia;
+      } catch { /* fallback */ }
+    }
+  }
   return bal;
+}
+
+async function getUserBalanceObj(userId) {
+  const raw = await redis('HGET', 'user_balance', String(userId));
+  if (raw?.result) {
+    try { return JSON.parse(raw.result); } catch {}
+  }
+  return { f: 0, d: 0 };
 }
 
 async function getDuel(duelId) {
@@ -164,13 +186,12 @@ async function getDuel(duelId) {
 
 // Если finishDuel вернул null (SETNX занят — кто-то уже зафиксировал победителя раньше),
 // читаем duel_result из Redis и возвращаем реального победителя.
-// Это устраняет race condition: захардкоженный winner в return-блоке мог перебить настоящего победителя.
 async function getTrueWinner(duelId, fallbackWinner) {
   try {
     const raw = await redis('GET', `duel_result:${duelId}`);
     if (raw?.result) {
       const parsed = JSON.parse(raw.result);
-      if (parsed?.winner) return { winner: parsed.winner, reason: parsed.reason };
+      if (parsed?.winner !== undefined) return { winner: parsed.winner, reason: parsed.reason };
     }
   } catch { /* fallback */ }
   return { winner: fallbackWinner, reason: null };
@@ -182,7 +203,7 @@ async function saveDuel(duel) {
 }
 
 // результат пишется ОДИН раз (SETNX): первый достигший цели — победитель навсегда.
-// Ставка-банк: escrow обоих игроков уходит победителю (выдаётся в дуэльном мини-аппе и на сервере).
+// Ставка-банк: зараховується клієнтом DuelApp безпосередньо у сейв гравця, а сервер додає бонуси (+5 💎) та оновлює user_balance.
 async function finishDuel(duel, winner, reason) {
   if (!winner || winner === 'none' || reason === 'no_funds' || duel.stage === 'cancelled') {
     duel.stage = 'cancelled';
@@ -201,27 +222,74 @@ async function finishDuel(duel, winner, reason) {
   await saveDuel(duel);
 
   const sym = duel.stakeCur === 'gem' ? '💎' : '🫓';
-  // Якщо бій не розпочався (forfeit до старту гри) — банк НЕ подвоюється, а лише повертається своя ставка!
   const isPreGameForfeit = reason === 'forfeit' && (!duel.startTs || preStage !== 'live');
-  const totalPot = isPreGameForfeit ? (duel.stake || 0) : ((duel.stake || 0) * 2);
+
+  // Читаємо фактично внесений ескроу з Redis
+  const escrowRaw = await redis('HGETALL', `duel_escrow:${duel.id}`);
+  const escrowMap = {};
+  if (escrowRaw?.result && Array.isArray(escrowRaw.result)) {
+    for (let i = 0; i < escrowRaw.result.length; i += 2) {
+      escrowMap[escrowRaw.result[i]] = parseInt(escrowRaw.result[i + 1], 10) || 0;
+    }
+  }
+
+  // Якщо суперник не увійшов у гру (неявка до початку бою):
+  // Жодних безкоштовних виплат! Повертаємо лише фактично внесений ескроу тим, хто його вносив.
+  if (isPreGameForfeit) {
+    duel.stage = 'cancelled';
+    duel.winner = null;
+    duel.reason = 'no_show';
+    await saveDuel(duel);
+
+    const paidWinner = escrowMap[winner] || 0;
+    if (paidWinner > 0) {
+      if (duel.stakeCur === 'gem') await grantDiamonds(winner, paidWinner);
+      else await grantFocaccia(winner, paidWinner);
+    }
+    const loser = winner === duel.p1.id ? duel.p2.id : duel.p1.id;
+    const paidLoser = escrowMap[loser] || 0;
+    if (paidLoser > 0) {
+      if (duel.stakeCur === 'gem') await grantDiamonds(loser, paidLoser);
+      else await grantFocaccia(loser, paidLoser);
+    }
+    await redis('DEL', `duel_escrow:${duel.id}`);
+
+    await sendTg(winner, `ℹ️ Суперник не увійшов у дуель — виклик скасовано.${paidWinner > 0 ? ` Твою ставку ${paidWinner.toLocaleString('ru')} ${sym} повернуто.` : ''}`);
+    await sendTg(loser, `⏱ Ти не увійшов у дуель — виклик скасовано.`);
+    return { winner: null, reason: 'no_show' };
+  }
+
   const draw = winner === 'draw';
 
   if (!draw) {
-    if (duel.stakeCur === 'gem') {
-      await grantDiamonds(winner, totalPot + (isPreGameForfeit ? 0 : 5));
-    } else {
-      if (totalPot > 0) await grantFocaccia(winner, totalPot);
-      if (!isPreGameForfeit) await grantDiamonds(winner, 5);
-    }
     const loser = winner === duel.p1.id ? duel.p2.id : duel.p1.id;
+    const pot = (duel.stake || 0) * 2;
+
+    // Бонус за перемогу в дуелі (+5 💎)
+    await grantDiamonds(winner, 5);
+
+    // Оновлюємо user_balance у Redis
+    try {
+      const curObjW = await getUserBalanceObj(winner);
+      const curObjL = await getUserBalanceObj(loser);
+      if (duel.stakeCur === 'gem') {
+        await redis('HSET', 'user_balance', winner, JSON.stringify({ ...curObjW, d: (curObjW.d || 0) + (duel.stake || 0), ts: Date.now() }));
+        await redis('HSET', 'user_balance', loser, JSON.stringify({ ...curObjL, d: Math.max(0, (curObjL.d || 0) - (duel.stake || 0)), ts: Date.now() }));
+      } else {
+        await redis('HSET', 'user_balance', winner, JSON.stringify({ ...curObjW, f: (curObjW.f || 0) + (duel.stake || 0), ts: Date.now() }));
+        await redis('HSET', 'user_balance', loser, JSON.stringify({ ...curObjL, f: Math.max(0, (curObjL.f || 0) - (duel.stake || 0)), ts: Date.now() }));
+      }
+    } catch { /* ignore */ }
+
     const winText =
-      reason === 'cheat' ? `🏆 Перемога! Суперник використав стороннє ПЗ.\n💰 Твій виграш: ${totalPot.toLocaleString('ru')} ${sym}!\n🎁 Бонус: +5 💎` :
-      reason === 'forfeit' ? (isPreGameForfeit ? `ℹ️ Суперник не увійшов у дуель.\n💰 Твою ставку ${totalPot.toLocaleString('ru')} ${sym} повернуто.` : `🏆 Перемога! Суперник покинув дуель під час бою.\n💰 Твій виграш: ${totalPot.toLocaleString('ru')} ${sym}!\n🎁 Бонус: +5 💎`) :
-      `🏆 ПЕРЕМОГА В ДУЕЛІ!\n💰 Твій виграш: ${totalPot.toLocaleString('ru')} ${sym} (банк дуелі)!\n🎁 Бонус: +5 💎 (забери в грі)`;
+      reason === 'cheat' ? `🏆 Перемога! Суперник використав стороннє ПЗ.\n💰 Твій виграш: ${pot.toLocaleString('ru')} ${sym}!\n🎁 Бонус: +5 💎` :
+      reason === 'forfeit' ? `🏆 Перемога! Суперник здався під час бою.\n💰 Твій виграш: ${pot.toLocaleString('ru')} ${sym}!\n🎁 Бонус: +5 💎` :
+      `🏆 ПЕРЕМОГА В ДУЕЛІ!\n💰 Твій виграш: ${pot.toLocaleString('ru')} ${sym} (банк дуелі)!\n🎁 Бонус: +5 💎 (забери в грі)`;
     const loseText =
       reason === 'cheat' ? '🚫 Виявлено стороннє ПЗ — поразка. −10 карми.' :
-      reason === 'forfeit' ? `🏃 Поразка — ти покинув дуель.\n💸 Втрачено: ${(duel.stake || 0).toLocaleString('ru')} ${sym}` :
+      reason === 'forfeit' ? `🏳️ Поразка — ти здався у дуелі.\n💸 Втрачено: ${(duel.stake || 0).toLocaleString('ru')} ${sym}` :
       `💔 Суперник наклікав швидше.\n💸 Втрачено: ${(duel.stake || 0).toLocaleString('ru')} ${sym}`;
+
     await sendTg(winner, winText);
     await sendTg(loser, loseText);
     if (reason === 'cheat') {
@@ -229,23 +297,15 @@ async function finishDuel(duel, winner, reason) {
       await setKarma(loser, Math.max(0, k - 10));
     }
   } else {
-    if (duel.stake > 0) {
-      if (duel.stakeCur === 'gem') {
-        await grantDiamonds(duel.p1.id, duel.stake + 2);
-        await grantDiamonds(duel.p2.id, duel.stake + 2);
-      } else {
-        await grantFocaccia(duel.p1.id, duel.stake);
-        await grantFocaccia(duel.p2.id, duel.stake);
-        await grantDiamonds(duel.p1.id, 2);
-        await grantDiamonds(duel.p2.id, 2);
-      }
-    } else {
-      await grantDiamonds(duel.p1.id, 2);
-      await grantDiamonds(duel.p2.id, 2);
-    }
+    // Нічия: повернення ставок виконує DuelApp.tsx, сервер нараховує бонуси +2 💎
+    await grantDiamonds(duel.p1.id, 2);
+    await grantDiamonds(duel.p2.id, 2);
+
     await sendTg(duel.p1.id, `🤝 Час вийшов — нічия!\n💰 Ставка ${(duel.stake || 0).toLocaleString('ru')} ${sym} повернута.\n🎁 Бонус: +2 💎 обом`);
     await sendTg(duel.p2.id, `🤝 Час вийшов — нічия!\n💰 Ставка ${(duel.stake || 0).toLocaleString('ru')} ${sym} повернута.\n🎁 Бонус: +2 💎 обом`);
   }
+
+  await redis('DEL', `duel_escrow:${duel.id}`);
   return { winner, reason };
 }
 
@@ -458,7 +518,7 @@ module.exports = async function handler(req, res) {
         // Валідація балансу творця
         if (stake > 0) {
           const fromBal = await getUserBalance(from, stakeCur);
-          if (fromBal !== null && fromBal < stake) {
+          if (fromBal === null || fromBal < stake) {
             return res.status(200).json({ ok: false, error: 'no_funds_creator' });
           }
 
@@ -524,7 +584,7 @@ module.exports = async function handler(req, res) {
 
         if (duel.stake > 0) {
           const bal = await getUserBalance(userId, duel.stakeCur);
-          if (bal !== null && bal < duel.stake) {
+          if (bal === null || bal < duel.stake) {
             return res.status(200).json({ ok: false, error: 'no_funds' });
           }
         }
@@ -648,6 +708,25 @@ module.exports = async function handler(req, res) {
         return res.status(200).json({ ok: true, stage: 'cancelled', winner: null, reason: 'no_funds' });
       }
 
+      // --- добровільна здача (кнопка "🏳️ Здатися" в міні-аппі) ---
+      if (action === 'forfeit') {
+        if (duel.stage === 'live' || duel.stage === 'countdown' || duel.stage === 'paused') {
+          const fin = await finishDuel(duel, opp.id, 'forfeit');
+          const { winner: trueWinner } = fin ?? await getTrueWinner(duelId, opp.id);
+          return res.status(200).json({ ok: true, stage: 'finished', winner: trueWinner, reason: 'forfeit' });
+        }
+        if (duel.stage === 'challenge') {
+          duel.stage = 'cancelled';
+          duel.reason = 'creator_cancelled';
+          await saveDuel(duel);
+          if (opp?.id) {
+            await sendDuelTg(opp.id, `❌ ${me.name || 'Суперник'} скасував виклик на дуель.`);
+          }
+          return res.status(200).json({ ok: true, stage: 'cancelled' });
+        }
+        return res.status(200).json({ ok: true, stage: duel.stage });
+      }
+
       if (action && action !== 'sync') {
         return res.status(400).json({ ok: false, error: 'unknown action' });
       }
@@ -721,11 +800,12 @@ module.exports = async function handler(req, res) {
         duel.startTs = now + 7000; // 4с интро VS + 3с отсчёт
         await saveDuel(duel);
       } else if (duel.acceptedAt && (now - duel.acceptedAt) > ACCEPT_TTL) {
-        // соперник так и не вошёл — техническое поражение
+        // соперник так и не вошёл — технічна відміна
         const joinedId = isSeen1Recent ? duel.p1.id : (isSeen2Recent ? duel.p2.id : null);
         if (joinedId) {
           const fin = await finishDuel(duel, joinedId, 'forfeit');
-          return res.status(200).json({ ok: true, stage: 'finished', winner: fin?.winner, reason: 'forfeit' });
+          const { winner: trueWinner, reason: trueReason } = fin ?? await getTrueWinner(duelId, null);
+          return res.status(200).json({ ok: true, stage: duel.stage || 'cancelled', winner: trueWinner, reason: trueReason || 'no_show' });
         }
       }
     }
@@ -773,12 +853,24 @@ module.exports = async function handler(req, res) {
     if ((duel.stage === 'live') && delta > 0) {
       myScore = parseInt((await redis('HINCRBY', `duel_scores:${duelId}`, userId, String(delta)))?.result || '0', 10);
 
-      // валидация темпа: implied CPS между репортами; 3 страйка → чит-финиш
+      // Валідація темпу: захист від автоклікерів без хибних банів через пінг
       const prevTapRaw = await redis('HGET', `duel_lasttap:${duelId}`, userId);
-      const prevTap = prevTapRaw?.result ? parseInt(prevTapRaw.result) : 0;
+      const prevTap = prevTapRaw?.result ? parseInt(prevTapRaw.result, 10) : 0;
       await redis('HSET', `duel_lasttap:${duelId}`, userId, String(now));
-      const dMs = Math.max(1, now - prevTap);
-      if (prevTap > 0 && (delta * 1000) / dMs > MAX_RATE) {
+
+      const dMs = prevTap > 0 ? (now - prevTap) : 0;
+      const elapsedMatchSec = duel.startTs ? Math.max(1, (now - duel.startTs) / 1000) : 1;
+      const overallCps = myScore / elapsedMatchSec;
+
+      // Підозра на автоклікер:
+      // 1) Більше 25 тапів за один репорт (при інтервалі ~900мс це >27 CPS)
+      // 2) Середня швидкість за весь раунд перевищує MAX_RATE (22 CPS) при тривалості > 3с
+      // 3) dMs >= 600ms і локальний рейт перевищує MAX_RATE
+      const isBurstAbuse = delta > 25;
+      const isAverageAbuse = elapsedMatchSec >= 3 && overallCps > MAX_RATE;
+      const isIntervalAbuse = dMs >= 600 && (delta * 1000) / dMs > MAX_RATE;
+
+      if (isBurstAbuse || isAverageAbuse || isIntervalAbuse) {
         const v = parseInt((await redis('HINCRBY', `duel_viol:${duelId}`, userId, '1'))?.result || '0', 10);
         if (v >= RATE_VIOLATIONS) {
           const fin = await finishDuel(duel, opp.id, 'cheat');
