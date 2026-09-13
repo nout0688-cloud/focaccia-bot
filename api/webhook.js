@@ -5963,6 +5963,86 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: true });
     }
 
+    // /takegems <username|ID> <amount> — deduct diamonds
+    if (cmd.startsWith('/takegems ') || cmd.startsWith('takegems ')) {
+      const raw = text.replace(/^\/?takegems\s+/i, '').trim();
+      const parts = raw.split(/\s+/);
+      if (parts.length < 2) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Формат: /takegems <username|ID> <кількість>' });
+        return res.status(200).json({ ok: true });
+      }
+      const amount = parseInt(parts[1]);
+      if (!amount || amount <= 0) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Вкажи правильну кількість' });
+        return res.status(200).json({ ok: true });
+      }
+      const target = await resolveTargetUser(parts[0]);
+      if (!target) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: `❌ Користувача ${parts[0]} не знайдено` });
+        return res.status(200).json({ ok: true });
+      }
+      const targetChatId = target.id;
+      const exGem = await redis('GET', `reward_gem:${targetChatId}`);
+      if (exGem?.result) {
+        const r = parseInt(exGem.result, 10);
+        if (r <= amount) await redis('DEL', `reward_gem:${targetChatId}`);
+        else await redis('SET', `reward_gem:${targetChatId}`, String(r - amount));
+      }
+      const exDeduct = await redis('GET', `deduct_gem:${targetChatId}`);
+      const curD = exDeduct?.result ? parseInt(exDeduct.result) : 0;
+      await redis('SET', `deduct_gem:${targetChatId}`, String(curD + amount));
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: `✅ Встановлено списання *${amount}* 💎 алмазів для ${target.display} при наступному вході в гру.`,
+        parse_mode: 'Markdown',
+      });
+      return res.status(200).json({ ok: true });
+    }
+
+    // /takeall <foc|gem> <amount> — mass deduct from all players
+    if (cmd.startsWith('/takeall ') || cmd.startsWith('takeall ')) {
+      const raw = text.replace(/^\/?takeall\s+/i, '').trim();
+      const parts = raw.split(/\s+/);
+      if (parts.length < 2) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Формат: /takeall <foc|gem> <кількість>' });
+        return res.status(200).json({ ok: true });
+      }
+      const cur = parts[0].toLowerCase();
+      const amount = parseInt(parts[1]);
+      if (!amount || amount <= 0) {
+        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Вкажи правильну кількість' });
+        return res.status(200).json({ ok: true });
+      }
+      const ids = new Set();
+      const usersData = await redis('HGETALL', 'users');
+      if (usersData?.result) {
+        for (let i = 0; i < usersData.result.length; i += 2) ids.add(String(usersData.result[i]));
+      }
+      const lbData = await redis('HGETALL', 'leaderboard');
+      if (lbData?.result) {
+        for (let i = 0; i < lbData.result.length; i += 2) ids.add(String(lbData.result[i]));
+      }
+      ids.delete(String(ADMIN_ID));
+      const idList = Array.from(ids);
+      for (const uid of idList) {
+        if (cur === 'gem' || cur === 'diamonds') {
+          const ex = await redis('GET', `deduct_gem:${uid}`);
+          const c = ex?.result ? parseInt(ex.result, 10) : 0;
+          await redis('SET', `deduct_gem:${uid}`, String(c + amount));
+        } else {
+          const ex = await redis('GET', `deduct:${uid}`);
+          const c = ex?.result ? parseInt(ex.result, 10) : 0;
+          await redis('SET', `deduct:${uid}`, String(c + amount));
+        }
+      }
+      await sendTg(TOKEN, 'sendMessage', {
+        chat_id: chatId,
+        text: `✅ Встановлено масове списання по *${cur === 'gem' ? `${amount} 💎` : `${amount.toLocaleString()} 🫓`}* для ${idList.length} гравців!`,
+        parse_mode: 'Markdown',
+      });
+      return res.status(200).json({ ok: true });
+    }
+
     // /lb_clear — wipe the leaderboard
     if (cmd === '/lb_clear' || cmd === 'lb_clear') {
       await redis('DEL', 'leaderboard');

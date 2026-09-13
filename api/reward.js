@@ -303,6 +303,105 @@ module.exports = async function handler(req, res) {
     }
   }
 
+  // ===== 👑 ADMIN ACTION: MASS DEDUCTION (TAKE AWAY FROM ALL PLAYERS) =====
+  if (action === 'deduct_all') {
+    const reqAdminId = parseInt(body.adminId || req.query.adminId || '0', 10);
+    if (reqAdminId !== ADMIN_ID) {
+      return res.status(403).json({ ok: false, error: 'Unauthorized: admin only' });
+    }
+    const cur = (body.cur || req.query.cur || 'foc').toLowerCase();
+    const amount = parseInt(body.amount || req.query.amount || '0', 10);
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ ok: false, error: 'invalid amount' });
+    }
+    const includeAdmin = body.includeAdmin === true || body.includeAdmin === '1' || body.includeAdmin === 1;
+
+    try {
+      const ids = new Set();
+      const usersData = await redis('HGETALL', 'users');
+      if (usersData?.result) {
+        for (let i = 0; i < usersData.result.length; i += 2) {
+          ids.add(String(usersData.result[i]));
+        }
+      }
+      const lbData = await redis('HGETALL', 'leaderboard');
+      if (lbData?.result) {
+        for (let i = 0; i < lbData.result.length; i += 2) {
+          ids.add(String(lbData.result[i]));
+        }
+      }
+      if (!includeAdmin) {
+        ids.delete(String(ADMIN_ID));
+      } else {
+        ids.add(String(ADMIN_ID));
+      }
+
+      const idList = Array.from(ids);
+      const botToken = process.env.BOT_TOKEN;
+      const BATCH_SIZE = 10;
+      let successCount = 0;
+
+      for (let i = 0; i < idList.length; i += BATCH_SIZE) {
+        const batch = idList.slice(i, i + BATCH_SIZE);
+        await Promise.allSettled(
+          batch.map(async (uid) => {
+            if (cur === 'gem' || cur === 'diamonds') {
+              const ex = await redis('GET', `deduct_gem:${uid}`);
+              const c = ex?.result ? parseInt(ex.result, 10) : 0;
+              await redis('SET', `deduct_gem:${uid}`, String(c + amount));
+              const exRew = await redis('GET', `reward_gem:${uid}`);
+              if (exRew?.result) {
+                const r = parseInt(exRew.result, 10);
+                if (r <= amount) {
+                  await redis('DEL', `reward_gem:${uid}`);
+                } else {
+                  await redis('SET', `reward_gem:${uid}`, String(r - amount));
+                }
+              }
+            } else {
+              const ex = await redis('GET', `deduct:${uid}`);
+              const c = ex?.result ? parseInt(ex.result, 10) : 0;
+              await redis('SET', `deduct:${uid}`, String(c + amount));
+              const exRew = await redis('GET', `reward:${uid}`);
+              if (exRew?.result) {
+                const r = parseInt(exRew.result, 10);
+                if (r <= amount) {
+                  await redis('DEL', `reward:${uid}`);
+                } else {
+                  await redis('SET', `reward:${uid}`, String(r - amount));
+                }
+              }
+            }
+            successCount++;
+
+            if (botToken) {
+              const textMsg = (cur === 'gem' || cur === 'diamonds')
+                ? `⚠️ *Адміністратор списав у всіх гравців по -${amount} 💎 алмазів.*`
+                : `⚠️ *Адміністратор списав у всіх гравців по -${amount.toLocaleString()} 🫓 фокач.*`;
+              fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  chat_id: Number(uid),
+                  text: textMsg,
+                  parse_mode: 'Markdown',
+                  reply_markup: {
+                    inline_keyboard: [[{ text: '🫓 Відкрити гру', web_app: { url: WEBAPP_URL } }]],
+                  },
+                }),
+              }).catch(() => {});
+            }
+          })
+        );
+      }
+
+      return res.status(200).json({ ok: true, count: successCount, amount, cur });
+    } catch (err) {
+      console.error('Deduct all error:', err);
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+  }
+
 async function resolveUserId(input) {
   if (!input) return null;
   const raw = String(input).replace(/^@/, '').trim();
@@ -405,6 +504,73 @@ async function resolveUserId(input) {
           parse_mode: 'Markdown',
           reply_markup: {
             inline_keyboard: [[{ text: '🫓 Забрати нагороду!', web_app: { url: WEBAPP_URL } }]],
+          },
+        }),
+      }).catch(() => {});
+    }
+
+    return res.status(200).json({ ok: true, targetId, amount, cur });
+  }
+
+  // ===== 👑 ADMIN ACTION: DEDUCT CURRENCY FROM SPECIFIC USER =====
+  if (action === 'deduct_user') {
+    const reqAdminId = parseInt(body.adminId || req.query.adminId || '0', 10);
+    if (reqAdminId !== ADMIN_ID) {
+      return res.status(403).json({ ok: false, error: 'Unauthorized: admin only' });
+    }
+    const targetInput = body.target || body.targetUserId || req.query.target;
+    const targetId = await resolveUserId(targetInput);
+    if (!targetId) {
+      return res.status(404).json({ ok: false, error: 'User not found' });
+    }
+    const cur = (body.cur || req.query.cur || 'foc').toLowerCase();
+    const amount = parseInt(body.amount || req.query.amount || '0', 10);
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ ok: false, error: 'invalid amount' });
+    }
+
+    if (cur === 'gem' || cur === 'diamonds') {
+      const ex = await redis('GET', `deduct_gem:${targetId}`);
+      const c = ex?.result ? parseInt(ex.result, 10) : 0;
+      await redis('SET', `deduct_gem:${targetId}`, String(c + amount));
+      const exRew = await redis('GET', `reward_gem:${targetId}`);
+      if (exRew?.result) {
+        const r = parseInt(exRew.result, 10);
+        if (r <= amount) {
+          await redis('DEL', `reward_gem:${targetId}`);
+        } else {
+          await redis('SET', `reward_gem:${targetId}`, String(r - amount));
+        }
+      }
+    } else {
+      const ex = await redis('GET', `deduct:${targetId}`);
+      const c = ex?.result ? parseInt(ex.result, 10) : 0;
+      await redis('SET', `deduct:${targetId}`, String(c + amount));
+      const exRew = await redis('GET', `reward:${targetId}`);
+      if (exRew?.result) {
+        const r = parseInt(exRew.result, 10);
+        if (r <= amount) {
+          await redis('DEL', `reward:${targetId}`);
+        } else {
+          await redis('SET', `reward:${targetId}`, String(r - amount));
+        }
+      }
+    }
+
+    const botToken = process.env.BOT_TOKEN;
+    if (botToken) {
+      const textMsg = (cur === 'gem' || cur === 'diamonds')
+        ? `⚠️ *Адміністратор списав у тебе -${amount} 💎 алмазів.*`
+        : `⚠️ *Адміністратор списав у тебе -${amount.toLocaleString()} 🫓 фокач.*`;
+      fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: Number(targetId),
+          text: textMsg,
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [[{ text: '🫓 Відкрити гру', web_app: { url: WEBAPP_URL } }]],
           },
         }),
       }).catch(() => {});
