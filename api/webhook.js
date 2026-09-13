@@ -3410,6 +3410,16 @@ module.exports = async function handler(req, res) {
     if (update.message?.successful_payment) {
       const msg = update.message;
       const sp = msg.successful_payment;
+
+      const chargeId = sp.telegram_payment_charge_id || sp.provider_payment_charge_id;
+      if (chargeId) {
+        const dedup = await redis('SET', `payment_processed:${chargeId}`, '1', 'NX', 'EX', 2592000);
+        if (!dedup?.result) {
+          // Вже оброблено раніше — захист від повторних запитів Telegram
+          return res.status(200).json({ ok: true, duplicate: true });
+        }
+      }
+
       const payload = String(sp.invoice_payload || '');
       const parts = payload.split(':');
       const targetUserId = parts[0] || String(msg.from.id);

@@ -22,44 +22,44 @@ const PACKAGES = {
   gems_50: {
     title: '50 Діамантів 💎',
     description: 'Жменя сяючих діамантів для прокачок у Фокача Клікер',
-    stars: 15,
-    priceUah: 15,
+    stars: 13,
+    priceUah: 13,
     diamonds: 50,
   },
   gems_150: {
     title: '150 Діамантів 💎',
     description: 'Мішечок сяючих діамантів (+15 бонус)',
-    stars: 35,
-    priceUah: 35,
+    stars: 33,
+    priceUah: 33,
     diamonds: 150,
   },
   gems_500: {
     title: '500 Діамантів 💎',
     description: 'Скриня сяючих діамантів (+75 бонус)',
-    stars: 79,
-    priceUah: 79,
+    stars: 77,
+    priceUah: 77,
     diamonds: 500,
   },
   gems_1500: {
     title: '1500 Діамантів 💎',
     description: 'Скарбниця Фокачі (+300 бонус)',
-    stars: 159,
-    priceUah: 159,
+    stars: 157,
+    priceUah: 157,
     diamonds: 1500,
   },
   starter_pack: {
     title: '⚡ Стартовий набір',
     description: '100 💎 + зброя «Бойова скалка» 🪵 для боротьби з босами',
-    stars: 19,
-    priceUah: 19,
+    stars: 17,
+    priceUah: 17,
     diamonds: 100,
     isStarter: true,
   },
   tip_dev: {
     title: '☕ Чайові розробнику',
     description: '25 💎 + особлива позначка 💖 Меценат у профілі',
-    stars: 15,
-    priceUah: 15,
+    stars: 13,
+    priceUah: 13,
     diamonds: 25,
     isTip: true,
   },
@@ -87,6 +87,12 @@ module.exports = async function handler(req, res) {
     }
     let order = {};
     try { order = JSON.parse(raw.result); } catch {}
+
+    const reqUserId = String(req.query.userId || req.body?.userId || '').trim();
+    if (order.userId && reqUserId && String(order.userId) !== reqUserId) {
+      return res.status(403).json({ ok: false, error: 'Access denied' });
+    }
+
     return res.status(200).json({
       ok: true,
       orderId,

@@ -314,10 +314,11 @@ module.exports = async function handler(req, res) {
         }
       }
 
-      const tradeId = `tr_${now.toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+      const tradeId = `tr_${now.toString(36)}_${Math.random().toString(36).slice(2, 10)}${Math.random().toString(36).slice(2, 10)}`;
       const trade = {
         id: tradeId,
         stage: 'active', // active | completed | cancelled
+        intendedTo: to ? String(to) : null,
         p1: { id: String(from), name: fromName, u: fromU },
         p2: to ? { id: String(to), name: '', u: '' } : null,
         p1Offer: { focaccia: 0, diamonds: 0, skins: [] },
@@ -393,8 +394,12 @@ module.exports = async function handler(req, res) {
     const isP2Clean = !trade.p2Locked && !trade.p2Confirmed && (!trade.p2Offer || (trade.p2Offer.focaccia === 0 && trade.p2Offer.diamonds === 0 && (!trade.p2Offer.skins || trade.p2Offer.skins.length === 0)));
     const isP2SlotAvailable = isP2Empty || (!trade.p2Seen) || (isP2Clean && (!trade.p2.name || trade.p2.name === 'Гравець' || trade.p2.name === ''));
 
-    // Приєднання до відкритого посилання (open trade), якщо p2 ще немає або слот вільний і гравець не p1
+    // Приєднання до посилання трейду, якщо p2 ще немає або слот вільний і гравець не p1
     if (!isP1 && !isP2 && isP2SlotAvailable) {
+      if (trade.intendedTo && String(userId) !== String(trade.intendedTo)) {
+        return res.status(200).json({ ok: false, error: 'trade_is_private' });
+      }
+
       const clientRbt = Number(body.clientLastRebirthTime) || 0;
       if (clientRbt > 0) await setUserRebirthTime(userId, clientRbt);
       const lockCheck = await checkUserRebirthLock(userId, clientRbt);
@@ -478,24 +483,14 @@ module.exports = async function handler(req, res) {
 
     // 3. Синхронізація пропозицій (Sync)
     if (action === 'sync') {
-      // Оновлюємо кеш балансу користувача, якщо передано перевірений клієнтський баланс
-      if (body.clientBalance && typeof body.clientBalance === 'object') {
-        const cF = Math.max(0, Math.min(Number(body.clientBalance.f) || 0, 1e24));
-        const cD = Math.max(0, Math.min(Number(body.clientBalance.d) || 0, 1e9));
-        const curBal = await getUserBalance(userId);
-        if (cF > curBal.f || cD > curBal.d) {
-          await setUserBalance(userId, Math.max(curBal.f, cF), Math.max(curBal.d, cD));
-        }
-      }
-
       if (trade.stage === 'active' && body.offer && typeof body.offer === 'object') {
         const myLock = isP1 ? trade.p1Locked : trade.p2Locked;
         // Якщо гравець ще не зафіксував пропозицію або явно її редагує:
         if (!myLock) {
-          const rawFoc = Math.max(0, Math.min(Number(body.offer.focaccia) || 0, 1e24));
-          const rawDia = Math.max(0, Math.min(Number(body.offer.diamonds) || 0, 1e9));
+          const rawFoc = Math.max(0, Math.min(Math.floor(Number(body.offer.focaccia) || 0), 1e24));
+          const rawDia = Math.max(0, Math.min(Math.floor(Number(body.offer.diamonds) || 0), 1e9));
           const rawSkins = Array.isArray(body.offer.skins)
-            ? body.offer.skins.map((s) => String(s).slice(0, 40)).filter((s) => s && s !== 'skin_classic')
+            ? Array.from(new Set(body.offer.skins.map((s) => String(s).slice(0, 40)).filter((s) => s && s !== 'skin_classic')))
             : [];
 
           const targetOffer = isP1 ? trade.p1Offer : trade.p2Offer;
@@ -624,106 +619,116 @@ module.exports = async function handler(req, res) {
           return res.status(200).json({ ok: true, stage: trade.stage });
         }
 
-        // Оновлюємо баланси з клієнтських даних, якщо передано
-        if (body.clientBalance && typeof body.clientBalance === 'object') {
-          const cF = Math.max(0, Math.min(Number(body.clientBalance.f) || 0, 1e24));
-          const cD = Math.max(0, Math.min(Number(body.clientBalance.d) || 0, 1e9));
-          const curBal = await getUserBalance(userId);
-          if (cF > curBal.f || cD > curBal.d) {
-            await setUserBalance(userId, Math.max(curBal.f, cF), Math.max(curBal.d, cD));
+        const lockP1 = await redis('SET', `user_trade_lock:${trade.p1.id}`, '1', 'NX', 'EX', 10);
+        const lockP2 = await redis('SET', `user_trade_lock:${trade.p2.id}`, '1', 'NX', 'EX', 10);
+        if (!lockP1?.result || !lockP2?.result) {
+          if (lockP1?.result) await redis('DEL', `user_trade_lock:${trade.p1.id}`);
+          if (lockP2?.result) await redis('DEL', `user_trade_lock:${trade.p2.id}`);
+          await redis('DEL', lockKey);
+          return res.status(200).json({ ok: false, error: 'users_busy' });
+        }
+
+        try {
+          // Перевіряємо актуальні баланси обох гравців
+          const balP1 = await getUserBalance(trade.p1.id);
+          const balP2 = await getUserBalance(trade.p2.id);
+
+          const p1Offer = trade.p1Offer || { focaccia: 0, diamonds: 0, skins: [] };
+          const p2Offer = trade.p2Offer || { focaccia: 0, diamonds: 0, skins: [] };
+
+          const p1Foc = Math.max(0, Math.floor(Number(p1Offer.focaccia) || 0));
+          const p1Dia = Math.max(0, Math.floor(Number(p1Offer.diamonds) || 0));
+          const p2Foc = Math.max(0, Math.floor(Number(p2Offer.focaccia) || 0));
+          const p2Dia = Math.max(0, Math.floor(Number(p2Offer.diamonds) || 0));
+
+          if (balP1.f < p1Foc || balP1.d < p1Dia) {
+            trade.stage = 'cancelled';
+            trade.cancelledReason = `У гравця ${trade.p1.name} недостатньо коштів`;
+            await saveTrade(trade);
+            return res.status(200).json({ ok: false, error: 'insufficient_funds_p1' });
           }
-        }
+          if (balP2.f < p2Foc || balP2.d < p2Dia) {
+            trade.stage = 'cancelled';
+            trade.cancelledReason = `У гравця ${trade.p2.name} недостатньо коштів`;
+            await saveTrade(trade);
+            return res.status(200).json({ ok: false, error: 'insufficient_funds_p2' });
+          }
 
-        // Перевіряємо актуальні баланси обох гравців
-        const balP1 = await getUserBalance(trade.p1.id);
-        const balP2 = await getUserBalance(trade.p2.id);
+          const p1GainFoc = p2Foc;
+          const p1LossFoc = p1Foc;
+          const p1GainDia = p2Dia;
+          const p1LossDia = p1Dia;
+          const p1GrantSkins = Array.isArray(p2Offer.skins) ? Array.from(new Set(p2Offer.skins)) : [];
+          const p1RemoveSkins = Array.isArray(p1Offer.skins) ? Array.from(new Set(p1Offer.skins)) : [];
 
-        if (balP1.f < trade.p1Offer.focaccia || balP1.d < trade.p1Offer.diamonds) {
-          trade.stage = 'cancelled';
-          trade.cancelledReason = `У гравця ${trade.p1.name} недостатньо коштів`;
+          const p2GainFoc = p1Foc;
+          const p2LossFoc = p2Foc;
+          const p2GainDia = p1Dia;
+          const p2LossDia = p2Dia;
+          const p2GrantSkins = p1GrantSkins;
+          const p2RemoveSkins = p1RemoveSkins;
+
+          // 1. Атомарне оновлення user_balance у Redis:
+          const nextP1F = Math.max(0, balP1.f - p1LossFoc + p1GainFoc);
+          const nextP1D = Math.max(0, balP1.d - p1LossDia + p1GainDia);
+          const nextP2F = Math.max(0, balP2.f - p2LossFoc + p2GainFoc);
+          const nextP2D = Math.max(0, balP2.d - p2LossDia + p2GainDia);
+
+          await setUserBalance(trade.p1.id, nextP1F, nextP1D);
+          await setUserBalance(trade.p2.id, nextP2F, nextP2D);
+
+          // 2. Гарантована доставка винагород через чергу pending_trades для App.tsx:
+          const p1TradeData = {
+            tradeId: trade.id,
+            focacciaGain: p1GainFoc,
+            focacciaLoss: p1LossFoc,
+            diamondGain: p1GainDia,
+            diamondLoss: p1LossDia,
+            grantSkins: p1GrantSkins,
+            removeSkins: p1RemoveSkins,
+            partnerName: trade.p2.name || 'Партнер',
+            partnerId: String(trade.p2.id),
+            completedAt: now,
+          };
+
+          const p2TradeData = {
+            tradeId: trade.id,
+            focacciaGain: p2GainFoc,
+            focacciaLoss: p2LossFoc,
+            diamondGain: p2GainDia,
+            diamondLoss: p2LossDia,
+            grantSkins: p2GrantSkins,
+            removeSkins: p2RemoveSkins,
+            partnerName: trade.p1.name || 'Партнер',
+            partnerId: String(trade.p1.id),
+            completedAt: now,
+          };
+
+          await redis('HSET', `pending_trades:${trade.p1.id}`, trade.id, JSON.stringify(p1TradeData));
+          await redis('HSET', `pending_trades:${trade.p2.id}`, trade.id, JSON.stringify(p2TradeData));
+
+          trade.stage = 'completed';
+          trade.completedAt = now;
           await saveTrade(trade);
-          return res.status(200).json({ ok: false, error: 'insufficient_funds_p1' });
+
+          // Надсилаємо привітальні сповіщення у Telegram
+          const p1Got = [];
+          if (p1GainFoc > 0) p1Got.push(`${p1GainFoc.toLocaleString()} 🫓`);
+          if (p1GainDia > 0) p1Got.push(`${p1GainDia} 💎`);
+          if (p1GrantSkins.length > 0) p1Got.push(`${p1GrantSkins.length} скін(ів)`);
+
+          const p2Got = [];
+          if (p2GainFoc > 0) p2Got.push(`${p2GainFoc.toLocaleString()} 🫓`);
+          if (p2GainDia > 0) p2Got.push(`${p2GainDia} 💎`);
+          if (p2GrantSkins.length > 0) p2Got.push(`${p2GrantSkins.length} скін(ів)`);
+
+          await sendTg(trade.p1.id, `🎉 *Трейд успішно здійснено!*\nТи отримав від ${trade.p2.name}: ${p1Got.join(', ') || 'нічого'}.\nЗайди в гру, щоб переглянути інвентар!`, { parse_mode: 'Markdown' });
+          await sendTg(trade.p2.id, `🎉 *Трейд успішно здійснено!*\nТи отримав від ${trade.p1.name}: ${p2Got.join(', ') || 'нічого'}.\nЗайди в гру, щоб переглянути інвентар!`, { parse_mode: 'Markdown' });
+        } finally {
+          await redis('DEL', `user_trade_lock:${trade.p1.id}`);
+          await redis('DEL', `user_trade_lock:${trade.p2.id}`);
+          await redis('DEL', lockKey);
         }
-        if (balP2.f < trade.p2Offer.focaccia || balP2.d < trade.p2Offer.diamonds) {
-          trade.stage = 'cancelled';
-          trade.cancelledReason = `У гравця ${trade.p2.name} недостатньо коштів`;
-          await saveTrade(trade);
-          return res.status(200).json({ ok: false, error: 'insufficient_funds_p2' });
-        }
-
-        const p1Offer = trade.p1Offer || { focaccia: 0, diamonds: 0, skins: [] };
-        const p2Offer = trade.p2Offer || { focaccia: 0, diamonds: 0, skins: [] };
-
-        const p1GainFoc = p2Offer.focaccia || 0;
-        const p1LossFoc = p1Offer.focaccia || 0;
-        const p1GainDia = p2Offer.diamonds || 0;
-        const p1LossDia = p1Offer.diamonds || 0;
-        const p1GrantSkins = p2Offer.skins || [];
-        const p1RemoveSkins = p1Offer.skins || [];
-
-        const p2GainFoc = p1Offer.focaccia || 0;
-        const p2LossFoc = p2Offer.focaccia || 0;
-        const p2GainDia = p1Offer.diamonds || 0;
-        const p2LossDia = p2Offer.diamonds || 0;
-        const p2GrantSkins = p1Offer.skins || [];
-        const p2RemoveSkins = p2Offer.skins || [];
-
-        // 1. Атомарне оновлення user_balance у Redis:
-        const nextP1F = Math.max(0, balP1.f - p1LossFoc + p1GainFoc);
-        const nextP1D = Math.max(0, balP1.d - p1LossDia + p1GainDia);
-        const nextP2F = Math.max(0, balP2.f - p2LossFoc + p2GainFoc);
-        const nextP2D = Math.max(0, balP2.d - p2LossDia + p2GainDia);
-
-        await setUserBalance(trade.p1.id, nextP1F, nextP1D);
-        await setUserBalance(trade.p2.id, nextP2F, nextP2D);
-
-        // 2. Гарантована доставка винагород через чергу pending_trades для App.tsx:
-        const p1TradeData = {
-          tradeId: trade.id,
-          focacciaGain: p1GainFoc,
-          focacciaLoss: p1LossFoc,
-          diamondGain: p1GainDia,
-          diamondLoss: p1LossDia,
-          grantSkins: p1GrantSkins,
-          removeSkins: p1RemoveSkins,
-          partnerName: trade.p2.name || 'Партнер',
-          partnerId: String(trade.p2.id),
-          completedAt: now,
-        };
-
-        const p2TradeData = {
-          tradeId: trade.id,
-          focacciaGain: p2GainFoc,
-          focacciaLoss: p2LossFoc,
-          diamondGain: p2GainDia,
-          diamondLoss: p2LossDia,
-          grantSkins: p2GrantSkins,
-          removeSkins: p2RemoveSkins,
-          partnerName: trade.p1.name || 'Партнер',
-          partnerId: String(trade.p1.id),
-          completedAt: now,
-        };
-
-        await redis('HSET', `pending_trades:${trade.p1.id}`, trade.id, JSON.stringify(p1TradeData));
-        await redis('HSET', `pending_trades:${trade.p2.id}`, trade.id, JSON.stringify(p2TradeData));
-
-        trade.stage = 'completed';
-        trade.completedAt = now;
-        await saveTrade(trade);
-
-        // Надсилаємо привітальні сповіщення у Telegram
-        const p1Got = [];
-        if (p1GainFoc > 0) p1Got.push(`${p1GainFoc.toLocaleString()} 🫓`);
-        if (p1GainDia > 0) p1Got.push(`${p1GainDia} 💎`);
-        if (p1GrantSkins.length > 0) p1Got.push(`${p1GrantSkins.length} скін(ів)`);
-
-        const p2Got = [];
-        if (p2GainFoc > 0) p2Got.push(`${p2GainFoc.toLocaleString()} 🫓`);
-        if (p2GainDia > 0) p2Got.push(`${p2GainDia} 💎`);
-        if (p2GrantSkins.length > 0) p2Got.push(`${p2GrantSkins.length} скін(ів)`);
-
-        await sendTg(trade.p1.id, `🎉 *Трейд успішно здійснено!*\nТи отримав від ${trade.p2.name}: ${p1Got.join(', ') || 'нічого'}.\nЗайди в гру, щоб переглянути інвентар!`, { parse_mode: 'Markdown' });
-        await sendTg(trade.p2.id, `🎉 *Трейд успішно здійснено!*\nТи отримав від ${trade.p1.name}: ${p2Got.join(', ') || 'нічого'}.\nЗайди в гру, щоб переглянути інвентар!`, { parse_mode: 'Markdown' });
       }
 
       await saveTrade(trade);

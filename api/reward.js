@@ -19,6 +19,16 @@ async function redis(...args) {
   return res.json();
 }
 
+async function getdelSafe(key) {
+  const res = await redis('GETDEL', key);
+  if (res && res.error) {
+    const getRes = await redis('GET', key);
+    if (getRes?.result) await redis('DEL', key);
+    return getRes;
+  }
+  return res;
+}
+
 module.exports = async function handler(req, res) {
   // CORS headers for GitHub Pages
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -602,10 +612,9 @@ async function resolveUserId(input) {
 
     // Перевірка звукового тролінгу (рофл-звук від адміна)
     let roflSound = null;
-    const soundRaw = await redis('GET', `rofl_sound:${userId}`);
+    const soundRaw = await getdelSafe(`rofl_sound:${userId}`);
     if (soundRaw?.result) {
       roflSound = soundRaw.result;
-      await redis('DEL', `rofl_sound:${userId}`);
     } else {
       const globalSound = await redis('GET', 'rofl_sound_all');
       if (globalSound?.result) {
@@ -635,10 +644,9 @@ async function resolveUserId(input) {
     }
 
     // Check individual reset flag (set EXCLUSIVELY by admin manually)
-    const resetFlag = await redis('GET', `reset:${userId}`);
+    const resetFlag = await getdelSafe(`reset:${userId}`);
 
     if (resetFlag?.result) {
-      await redis('DEL', `reset:${userId}`);
       // Safety backup of the latest snapshot before wiping
       const currentSnap = await redis('GET', `user_latest_snapshot:${userId}`);
       if (currentSnap?.result) {
@@ -658,23 +666,21 @@ async function resolveUserId(input) {
     }
 
     // Check if admin dispatched an account restore
-    const restoreRaw = await redis('GET', `reward_restore:${userId}`);
+    const restoreRaw = await getdelSafe(`reward_restore:${userId}`);
     let pendingRestore = null;
     if (restoreRaw?.result) {
       try {
         pendingRestore = JSON.parse(restoreRaw.result);
-        await redis('DEL', `reward_restore:${userId}`);
       } catch {}
     }
 
     // Check skins wipe (individual user flag or global wipe)
     let resetSkins = false;
     let skinsResetTime = 0;
-    const indSkinsReset = await redis('GET', `reset_skins:${userId}`);
+    const indSkinsReset = await getdelSafe(`reset_skins:${userId}`);
     if (indSkinsReset?.result) {
       resetSkins = true;
       skinsResetTime = parseInt(indSkinsReset.result, 10) || Date.now();
-      await redis('DEL', `reset_skins:${userId}`);
     } else {
       const globalSkinsResetData = await redis('GET', 'global_skins_reset_time');
       if (globalSkinsResetData?.result) {
@@ -690,36 +696,38 @@ async function resolveUserId(input) {
       return res.status(200).json({ ok: true, reward: 0, karma, resetSkins, skinsResetTime, maintenance: isMaintenance });
     }
 
-    const data = await redis('GET', `reward:${userId}`);
+    const data = await getdelSafe(`reward:${userId}`);
     const amount = data?.result ? parseInt(data.result) : 0;
 
-    const rbData = await redis('GET', `rebirth:${userId}`);
+    const rbData = await getdelSafe(`rebirth:${userId}`);
     const rebirths = rbData?.result ? parseInt(rbData.result) : 0;
 
-    const gemData = await redis('GET', `reward_gem:${userId}`);
+    const gemData = await getdelSafe(`reward_gem:${userId}`);
     const diamonds = gemData?.result ? parseInt(gemData.result) : 0;
-    const gemSourceData = await redis('GET', `reward_gem_source:${userId}`);
+    const gemSourceData = diamonds > 0 ? await getdelSafe(`reward_gem_source:${userId}`) : null;
     const gemSource = gemSourceData?.result || 'admin';
 
-    const deductData = await redis('GET', `deduct:${userId}`);
+    const deductData = await getdelSafe(`deduct:${userId}`);
     const deduct = deductData?.result ? parseInt(deductData.result) : 0;
 
-    const deductGemData = await redis('GET', `deduct_gem:${userId}`);
+    const deductGemData = await getdelSafe(`deduct_gem:${userId}`);
     const deductDiamonds = deductGemData?.result ? parseInt(deductGemData.result) : 0;
 
     const extraUpgradeData = await redis('HGET', `user_extra:${userId}`, 'vip_upgrade');
     const extraUpgrade = extraUpgradeData?.result || null;
+    if (extraUpgrade) await redis('HDEL', `user_extra:${userId}`, 'vip_upgrade');
 
     const patronData = await redis('HGET', `user_extra:${userId}`, 'badge_patron');
     const patronBadge = patronData?.result === '1';
+    if (patronBadge) await redis('HDEL', `user_extra:${userId}`, 'badge_patron');
 
-    const rewardSkinsRaw = await redis('GET', `reward_skins:${userId}`);
+    const rewardSkinsRaw = await getdelSafe(`reward_skins:${userId}`);
     let grantSkins = [];
     if (rewardSkinsRaw?.result) {
       try { grantSkins = JSON.parse(rewardSkinsRaw.result); } catch {}
     }
 
-    const lostSkinsRaw = await redis('GET', `lost_skins:${userId}`);
+    const lostSkinsRaw = await getdelSafe(`lost_skins:${userId}`);
     let removeSkins = [];
     if (lostSkinsRaw?.result) {
       try { removeSkins = JSON.parse(lostSkinsRaw.result); } catch {}
@@ -738,19 +746,6 @@ async function resolveUserId(input) {
     }
 
     if (amount > 0 || rebirths > 0 || diamonds > 0 || deduct > 0 || deductDiamonds > 0 || extraUpgrade || patronBadge || resetSkins || grantSkins.length > 0 || removeSkins.length > 0 || trades.length > 0) {
-      // Clear pending grants after claiming
-      if (amount > 0) await redis('DEL', `reward:${userId}`);
-      if (rebirths > 0) await redis('DEL', `rebirth:${userId}`);
-      if (diamonds > 0) {
-        await redis('DEL', `reward_gem:${userId}`);
-        await redis('DEL', `reward_gem_source:${userId}`);
-      }
-      if (deduct > 0) await redis('DEL', `deduct:${userId}`);
-      if (deductDiamonds > 0) await redis('DEL', `deduct_gem:${userId}`);
-      if (extraUpgrade) await redis('HDEL', `user_extra:${userId}`, 'vip_upgrade');
-      if (patronBadge) await redis('HDEL', `user_extra:${userId}`, 'badge_patron');
-      if (grantSkins.length > 0) await redis('DEL', `reward_skins:${userId}`);
-      if (removeSkins.length > 0) await redis('DEL', `lost_skins:${userId}`);
 
       return res.status(200).json({
         ok: true,
