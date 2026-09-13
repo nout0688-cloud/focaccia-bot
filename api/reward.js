@@ -453,9 +453,19 @@ async function resolveUserId(input) {
 
     // Карма акаунта (античит)
     let karma = 100;
-    const kRaw = await redis('HGET', 'ac_karma', String(userId));
-    if (kRaw?.result) {
-      try { karma = Math.max(0, Math.min(100, JSON.parse(kRaw.result).k || 0)); } catch { /* */ }
+    const isUnflagged = await redis('GET', `unflagged:${userId}`);
+    const globalUnflag = await redis('GET', 'global_unflag_all_time');
+    if (isUnflagged?.result || globalUnflag?.result) {
+      karma = 100;
+      await redis('HSET', 'ac_karma', String(userId), JSON.stringify({ k: 100, on: 0, ts: Date.now() }));
+      await redis('HDEL', 'ac_active', String(userId));
+      await redis('HDEL', 'ac_total', String(userId));
+      await redis('SREM', 'flagged_users', String(userId));
+    } else {
+      const kRaw = await redis('HGET', 'ac_karma', String(userId));
+      if (kRaw?.result) {
+        try { karma = Math.max(0, Math.min(100, JSON.parse(kRaw.result).k || 0)); } catch { /* */ }
+      }
     }
 
     // Check individual reset flag (set EXCLUSIVELY by admin manually)

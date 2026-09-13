@@ -2502,6 +2502,68 @@ async function executeDiamondAll(TOKEN, adminChatId, amount) {
   });
 }
 
+async function executeUnflagUser(TOKEN, chatId, target) {
+  const targetChatId = String(target.id);
+  // 1. Відновлення карми до максимуму
+  await redis('HSET', 'ac_karma', targetChatId, JSON.stringify({ k: 100, on: 0, ts: Date.now() }));
+  // 2. Очищення всіх античит-міток та історії детектив
+  await redis('HDEL', 'ac_active', targetChatId);
+  await redis('HDEL', 'ac_total', targetChatId);
+  await redis('HDEL', 'ac_strikes', targetChatId);
+  await redis('HDEL', 'ac_debug_log', targetChatId);
+  await redis('SREM', 'flagged_users', targetChatId);
+  // 3. 7-денний імунітет від повторного перезапису застарілими даними клієнта
+  await redis('SET', `unflagged:${targetChatId}`, String(Date.now()), 'EX', 604800);
+
+  // 4. Сповіщення гравця в боті
+  try {
+    await sendTg(TOKEN, 'sendMessage', {
+      chat_id: Number(targetChatId),
+      text: '🎉 *Всі обмеження та попередження знято адміністратором!*\n\nТвоя карма відновлена до *100/100*. Казино, дуелі та лідерборд знову повністю відкриті! 🫓✨',
+      parse_mode: 'Markdown',
+    });
+  } catch {}
+
+  // 5. Відповідь адміністратору
+  await sendTg(TOKEN, 'sendMessage', {
+    chat_id: chatId,
+    text: `✅ *ГРАВЦЯ ${target.display} ПОВНІСТЮ ПРОЩЕНО!*\n\n• Карма: *100/100*\n• Всі знаки ⚠️ знято\n• Детекти очищено\n• Захист від застарілих даних клієнта активовано на 7 днів\n\nКористувача сповіщено в боті.`,
+    parse_mode: 'Markdown',
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: '👤 Відкрити картку', callback_data: `admin:check_user:${targetChatId}` }],
+        [{ text: '⬅️ Головне меню', callback_data: 'admin:back' }],
+      ],
+    },
+  });
+}
+
+async function executeUnflagAll(TOKEN, chatId) {
+  await redis('DEL', 'ac_active');
+  await redis('DEL', 'ac_total');
+  await redis('DEL', 'ac_strikes');
+  await redis('DEL', 'ac_debug_log');
+  await redis('DEL', 'flagged_users');
+  await redis('SET', 'global_unflag_all_time', String(Date.now()), 'EX', 604800);
+
+  const karmaData = await redis('HGETALL', 'ac_karma');
+  if (karmaData?.result) {
+    for (let i = 0; i < karmaData.result.length; i += 2) {
+      const uId = karmaData.result[i];
+      await redis('HSET', 'ac_karma', uId, JSON.stringify({ k: 100, on: 0, ts: Date.now() }));
+    }
+  }
+
+  await sendTg(TOKEN, 'sendMessage', {
+    chat_id: chatId,
+    text: '✅ *ВСІ ОБМЕЖЕННЯ ТА ВАРНИ ЗНЯТО З УСІХ ГРАВЦІВ!*\n\nУ кожного користувача відновлено карму 100/100 та очищено історію детектив.',
+    parse_mode: 'Markdown',
+    reply_markup: {
+      inline_keyboard: [[{ text: '⬅️ До адмінки', callback_data: 'admin:back' }]],
+    },
+  });
+}
+
 async function handleAdminAwaitInput(TOKEN, chatId, text, awaitData) {
   const action = awaitData?.action;
   const targetId = awaitData?.targetId;
@@ -3217,36 +3279,23 @@ async function handleAdminAwaitInput(TOKEN, chatId, text, awaitData) {
   }
 
   if (action === 'unflag') {
-    const target = await resolveTargetUser(text);
+    const raw = text.trim();
+    if (raw.toLowerCase() === 'all' || raw.toLowerCase() === 'всі' || raw.toLowerCase() === 'все' || raw.toLowerCase() === 'всем') {
+      await executeUnflagAll(TOKEN, chatId);
+      return;
+    }
+    const target = await resolveTargetUser(raw);
     if (!target) {
       await sendTg(TOKEN, 'sendMessage', {
         chat_id: chatId,
-        text: `❌ Користувача ${text} не знайдено.`,
+        text: `❌ Користувача "${text}" не знайдено в базі.`,
         reply_markup: {
           inline_keyboard: [[{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }]],
         },
       });
       return;
     }
-    const targetChatId = target.id;
-    await redis('HSET', 'ac_karma', targetChatId, JSON.stringify({ k: 100, on: 0, ts: Date.now() }));
-    await redis('HDEL', 'ac_active', targetChatId);
-    await redis('HDEL', 'ac_total', targetChatId);
-    await redis('HDEL', 'ac_strikes', targetChatId);
-    await redis('HDEL', 'ac_debug_log', targetChatId);
-    await redis('SREM', 'flagged_users', targetChatId);
-
-    await sendTg(TOKEN, 'sendMessage', {
-      chat_id: chatId,
-      text: `✅ ${target.display} повністю прощений: карма відновлена до *100/100*, знак ⚠️ та всі обмеження знято!`,
-      parse_mode: 'Markdown',
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: '👤 Відкрити картку', callback_data: `admin:check_user:${targetChatId}` }],
-          [{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }],
-        ],
-      },
-    });
+    await executeUnflagUser(TOKEN, chatId, target);
     return;
   }
 
@@ -4557,6 +4606,7 @@ module.exports = async function handler(req, res) {
           await redis('HDEL', 'ac_strikes', targetChatId);
           await redis('HDEL', 'ac_debug_log', targetChatId);
           await redis('SREM', 'flagged_users', targetChatId);
+          await redis('SET', `unflagged:${targetChatId}`, String(Date.now()), 'EX', 604800);
         } else {
           karma = Math.max(0, karma - 15);
           await redis('HSET', 'ac_karma', targetChatId, JSON.stringify({ k: karma, on: 0, ts: Date.now() }));
@@ -4590,6 +4640,23 @@ module.exports = async function handler(req, res) {
           const card = await renderUserCard(target);
           await sendTg(TOKEN, 'sendMessage', { chat_id: cqChat, ...card });
         }
+        return res.status(200).json({ ok: true });
+      }
+
+      // Зняти варн з конкретного гравця за інлайн-кнопкою
+      if (action === 'user_unflag_direct') {
+        const target = await resolveTargetUser(targetId);
+        if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+        if (target) {
+          await executeUnflagUser(TOKEN, cqChat, target);
+        }
+        return res.status(200).json({ ok: true });
+      }
+
+      // Зняти варн з усіх за інлайн-кнопкою
+      if (action === 'unflag_all_confirm') {
+        if (cqMsgId) await deleteTg(TOKEN, cqChat, cqMsgId);
+        await executeUnflagAll(TOKEN, cqChat);
         return res.status(200).json({ ok: true });
       }
 
@@ -6094,26 +6161,81 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: true });
     }
 
-    // /unflag <username|ID> — повне відновлення: карма 100, без знаків і детектів
-    if (cmd.startsWith('/unflag ') || cmd.startsWith('unflag ')) {
-      const targetArg = text.replace(/^\/?unflag\s+/i, '').trim();
-      const target = await resolveTargetUser(targetArg);
-      if (!target) {
-        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: `❌ Користувача ${targetArg} не знайдено` });
+    // /unflag або /unwarn <username|ID|all> — повне відновлення: карма 100, зняття всіх міток
+    const isUnflagCmd =
+      cmd.startsWith('/unflag') || cmd.startsWith('unflag') ||
+      cmd.startsWith('/unwarn') || cmd.startsWith('unwarn') ||
+      cmd.startsWith('/розбан') || cmd.startsWith('розбан');
+
+    if (isUnflagCmd) {
+      const targetArg = text.replace(/^\/?(unflag|unwarn|розбан)(@\w+)?\s*/i, '').trim();
+
+      if (!targetArg) {
+        // Інтерактивний вибір гравців з варнами або запит вводу
+        const totals = await redis('HGETALL', 'ac_total');
+        const flaggedButtons = [];
+        if (totals?.result) {
+          const names = {};
+          const usersData = await redis('HGETALL', 'users');
+          if (usersData?.result) {
+            for (let i = 0; i < usersData.result.length; i += 2) {
+              try {
+                const u = JSON.parse(usersData.result[i + 1]);
+                names[usersData.result[i]] = u.username ? `@${u.username}` : u.name;
+              } catch {}
+            }
+          }
+          for (let i = 0; i < totals.result.length; i += 2) {
+            const c = parseInt(totals.result[i + 1]) || 0;
+            if (c > 0) {
+              const fId = totals.result[i];
+              const fName = (names[fId] || fId).slice(0, 16);
+              flaggedButtons.push([{ text: `✅ Зняти з ${fName}`, callback_data: `admin:user_unflag_direct:${fId}` }]);
+            }
+          }
+        }
+
+        const pSent = await sendTg(TOKEN, 'sendMessage', {
+          chat_id: chatId,
+          text:
+            `✍️ *ЗНЯТТЯ ВАРНУ / UNFLAG*\n\n` +
+            `Вкажіть гравця у форматі:\n` +
+            `• \`/unflag @username\`\n` +
+            `• \`/unflag 1975429762\` (числовий ID)\n` +
+            `• \`/unflag all\` (зняти варн з усіх)\n\n` +
+            `Або просто введіть @username/ID у відповідь на це повідомлення:`,
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [
+              ...flaggedButtons.slice(0, 6),
+              [{ text: '🌐 Зняти варн з УСІХ гравців', callback_data: 'admin:unflag_all_confirm' }],
+              [{ text: '⬅️ До адмінки', callback_data: 'admin:back' }],
+            ],
+          },
+        });
+        const promptMsgId = pSent?.result?.message_id || '1';
+        await redis('SET', `admin_await:${chatId}`, JSON.stringify({
+          action: 'unflag',
+          promptMsgId,
+        }), 'EX', 300);
         return res.status(200).json({ ok: true });
       }
 
-      const targetChatId = target.id;
-      await redis('HSET', 'ac_karma', targetChatId, JSON.stringify({ k: 100, on: 0, ts: Date.now() }));
-      await redis('HDEL', 'ac_active', targetChatId);
-      await redis('HDEL', 'ac_total', targetChatId);
-      await redis('HDEL', 'ac_strikes', targetChatId);
-      await redis('HDEL', 'ac_debug_log', targetChatId);
-      await sendTg(TOKEN, 'sendMessage', {
-        chat_id: chatId,
-        text: `✅ ${target.display} повністю прощений: карма відновлена до *100/100*, знак ⚠️ та всі обмеження знято.`,
-        parse_mode: 'Markdown',
-      });
+      if (targetArg.toLowerCase() === 'all' || targetArg.toLowerCase() === 'всі' || targetArg.toLowerCase() === 'все' || targetArg.toLowerCase() === 'всем') {
+        await executeUnflagAll(TOKEN, chatId);
+        return res.status(200).json({ ok: true });
+      }
+
+      const target = await resolveTargetUser(targetArg);
+      if (!target) {
+        await sendTg(TOKEN, 'sendMessage', {
+          chat_id: chatId,
+          text: `❌ Користувача "${targetArg}" не знайдено в базі.\nПеревірте правильність @username або ID: \`/check ${targetArg}\``,
+        });
+        return res.status(200).json({ ok: true });
+      }
+
+      await executeUnflagUser(TOKEN, chatId, target);
       return res.status(200).json({ ok: true });
     }
 

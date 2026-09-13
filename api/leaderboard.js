@@ -222,9 +222,19 @@ module.exports = async function handler(req, res) {
           }
         }
       }
-      // Якщо клієнт локально знизив карму через автоклікер — сервер не повинен її перезаписувати вищою!
-      if (typeof body.clientKarma === 'number' && body.clientKarma < karma) {
-        karma = Math.max(0, body.clientKarma);
+      // Перевіряємо статус зняття варну (unflag) адміністратором
+      const isUnflagged = await redis('GET', `unflagged:${userId}`);
+      const globalUnflag = await redis('GET', 'global_unflag_all_time');
+      if (isUnflagged?.result || globalUnflag?.result) {
+        karma = 100;
+        await redis('HDEL', 'ac_active', userId);
+        await redis('HDEL', 'ac_total', userId);
+        await redis('SREM', 'flagged_users', userId);
+      } else if (typeof body.clientKarma === 'number' && body.clientKarma < karma) {
+        // Дозволяємо клієнту знижувати карму тільки якщо є реальні офлайн-детекти
+        if (Array.isArray(body.offlineEvents) && body.offlineEvents.length > 0) {
+          karma = Math.max(0, body.clientKarma);
+        }
       }
 
       // Карма: +1 за годину чесної онлайн-гри (максимум 2 хв за один репорт)
