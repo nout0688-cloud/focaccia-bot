@@ -3434,22 +3434,55 @@ module.exports = async function handler(req, res) {
     const cacheBuster = Math.floor(Date.now() / 30000);
     const lbImgUrl = `https://${host}/api/leaderboard-image?v=${cacheBuster}`;
 
-    // 1. 🏆 Топ-5 лідерборду (Картинка-картка)
+    // 1. 🏆 Топ-5 лідерборду (Графічна картка + рейтинг)
+    let topText = '';
+    try {
+      const lbRaw = await redis('HGETALL', 'leaderboard');
+      if (lbRaw?.result && Array.isArray(lbRaw.result)) {
+        let players = [];
+        for (let i = 0; i < lbRaw.result.length; i += 2) {
+          try {
+            const p = JSON.parse(lbRaw.result[i + 1]);
+            if (p.n && !p.n.includes('\uFFFD')) {
+              players.push({
+                name: p.n,
+                username: p.u || '',
+                total: Number(p.t) || 0,
+                prestige: parseInt(p.p, 10) || 0,
+              });
+            }
+          } catch {}
+        }
+        players.sort((a, b) => b.total - a.total);
+        const top5 = players.slice(0, 5);
+        const medals = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣'];
+        topText = top5.map((p, idx) => {
+          const uStr = p.username ? ` (@${escapeHtml(p.username)})` : '';
+          return `${medals[idx]} <b>${escapeHtml(p.name)}</b>${uStr} — <code>${formatNum(p.total)}</code> 🫓 (Престиж ${p.prestige})`;
+        }).join('\n');
+      }
+    } catch (e) {
+      console.error('Error fetching leaderboard for inline:', e);
+    }
+
     const resTop = {
-      type: 'photo',
+      type: 'article',
       id: 'top_leaderboard_' + cacheBuster,
-      title: '🏆 Топ-5 Лідерборду (Графічна картка)',
-      description: 'Красива картинка з найкращими пекарями серверу',
-      photo_url: lbImgUrl,
-      thumb_url: lbImgUrl,
-      caption:
-        `🏆 <b>Офіційний Топ-5 пекарів у Фокача Клікер!</b>\n\n` +
-        `🥇 1 місце — володар золотого звання пекаря!\n` +
-        `Змагайся з друзями, будуй пекарні та піднімайся на верхівку топу! 👇`,
-      parse_mode: 'HTML',
+      title: '🏆 Топ-5 Лідерборду (Картка та рейтинг)',
+      description: 'Найкращі пекарі серверу Фокача Клікер',
+      thumbnail_url: 'https://nout0688-cloud.github.io/focaccia-clicker/focaccia-192.png',
+      thumb_url: 'https://nout0688-cloud.github.io/focaccia-clicker/focaccia-192.png',
+      input_message_content: {
+        message_text:
+          `<a href="${lbImgUrl}">&#8205;</a>` +
+          `🏆 <b>Офіційний Топ-5 пекарів у Фокача Клікер!</b>\n\n` +
+          (topText ? `${topText}\n\n` : '') +
+          `🔥 <i>Змагайся з друзями, випікай фокачі та піднімайся на вершину рейтингу!</i>`,
+        parse_mode: 'HTML',
+      },
       reply_markup: {
         inline_keyboard: [
-          [{ text: '🫓 Змагатися у Фокача Клікер', web_app: { url: WEBAPP_URL } }],
+          [{ text: '🫓 Грати у Фокача Клікер', web_app: { url: WEBAPP_URL } }],
         ],
       },
     };
@@ -3460,6 +3493,7 @@ module.exports = async function handler(req, res) {
       id: 'duel_invite_' + Date.now(),
       title: '⚔️ Викликати на Дуель 1 на 1',
       description: 'Кинути виклик другу на швидкісний клік-батл у чаті',
+      thumbnail_url: 'https://nout0688-cloud.github.io/focaccia-clicker/focaccia-192.png',
       thumb_url: 'https://nout0688-cloud.github.io/focaccia-clicker/focaccia-192.png',
       input_message_content: {
         message_text:
@@ -3483,6 +3517,7 @@ module.exports = async function handler(req, res) {
       id: 'trade_invite_' + Date.now(),
       title: '🤝 Запросити в кімнату обміну (Трейд)',
       description: 'Обмінятися фокачами, алмазами та рідкісними скінами',
+      thumbnail_url: 'https://nout0688-cloud.github.io/focaccia-clicker/focaccia-192.png',
       thumb_url: 'https://nout0688-cloud.github.io/focaccia-clicker/focaccia-192.png',
       input_message_content: {
         message_text:
@@ -3524,6 +3559,7 @@ module.exports = async function handler(req, res) {
       id: 'my_profile_' + fromUser.id,
       title: '📇 Мій профіль та рекорди',
       description: `Показати свої рекорди: ${formatNum(myTotal)} 🫓 • Престиж ${myPrestige}`,
+      thumbnail_url: 'https://nout0688-cloud.github.io/focaccia-clicker/focaccia-192.png',
       thumb_url: 'https://nout0688-cloud.github.io/focaccia-clicker/focaccia-192.png',
       input_message_content: {
         message_text:
@@ -3550,6 +3586,7 @@ module.exports = async function handler(req, res) {
       id: 'fortune_' + fortuneId,
       title: '🥠 Печиво з передбаченням від Бабусі',
       description: 'Хто перший розламає печиво в чаті — дізнається долю та отримає бонус!',
+      thumbnail_url: 'https://nout0688-cloud.github.io/focaccia-clicker/focaccia-192.png',
       thumb_url: 'https://nout0688-cloud.github.io/focaccia-clicker/focaccia-192.png',
       input_message_content: {
         message_text:
@@ -3585,7 +3622,7 @@ module.exports = async function handler(req, res) {
     }
 
     try {
-      await fetch(`https://api.telegram.org/bot${TOKEN}/answerInlineQuery`, {
+      const tgRes = await fetch(`https://api.telegram.org/bot${TOKEN}/answerInlineQuery`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -3595,6 +3632,10 @@ module.exports = async function handler(req, res) {
           is_personal: true,
         }),
       });
+      const data = await tgRes.json();
+      if (!data.ok) {
+        console.error('Telegram answerInlineQuery failed:', data);
+      }
     } catch (e) {
       console.error('Error answering inline query:', e);
     }
