@@ -3387,6 +3387,10 @@ module.exports = async function handler(req, res) {
     if (!action && req.query) action = req.query.action;
 
     if (TOKEN) {
+      if (action === 'get_me') {
+        const me = await fetch(`https://api.telegram.org/bot${TOKEN}/getMe`).then(r => r.json());
+        return res.status(200).json(me);
+      }
       if (action === 'get_webhook') {
         const info = await fetch(`https://api.telegram.org/bot${TOKEN}/getWebhookInfo`).then(r => r.json());
         return res.status(200).json(info);
