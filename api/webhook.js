@@ -3380,6 +3380,21 @@ module.exports = async function handler(req, res) {
 
   if (req.method !== 'POST') {
     if (TOKEN) {
+      if (req.query?.action === 'get_webhook') {
+        const info = await fetch(`https://api.telegram.org/bot${TOKEN}/getWebhookInfo`).then(r => r.json());
+        return res.status(200).json(info);
+      }
+      if (req.query?.action === 'fix_webhook') {
+        const setRes = await fetch(`https://api.telegram.org/bot${TOKEN}/setWebhook`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            url: `https://focaccia-bot.vercel.app/api/webhook`,
+            allowed_updates: ['message', 'edited_message', 'callback_query', 'inline_query', 'chosen_inline_result', 'pre_checkout_query'],
+          }),
+        }).then(r => r.json());
+        return res.status(200).json(setRes);
+      }
       await checkScheduledContests(TOKEN).catch(() => {});
       await checkExpiredContests(TOKEN).catch(() => {});
     }
@@ -3387,6 +3402,194 @@ module.exports = async function handler(req, res) {
   }
 
   if (!TOKEN) return res.status(500).json({ error: 'BOT_TOKEN not set' });
+
+  let update = req.body;
+  if (typeof update === 'string') {
+    try { update = JSON.parse(update); } catch {}
+  }
+  if (!update || typeof update !== 'object') {
+    return res.status(200).json({ ok: true });
+  }
+
+  // ===== 🌟 TELEGRAM INLINE QUERY (ВИКОНУЄТЬСЯ МИТТЄВО БЕЗ ЗАТРИМОК) =====
+  if (update.inline_query) {
+    const iq = update.inline_query;
+    const iqId = iq.id;
+    const fromUser = iq.from;
+    const q = (iq.query || '').trim().toLowerCase();
+    const creatorName = [fromUser.first_name, fromUser.last_name].filter(Boolean).join(' ') || 'Гравець';
+    const creatorUsername = fromUser.username ? `@${fromUser.username}` : creatorName;
+    const host = req.headers.host || 'focaccia-bot.vercel.app';
+    const cacheBuster = Math.floor(Date.now() / 30000);
+    const lbImgUrl = `https://${host}/api/leaderboard-image?v=${cacheBuster}`;
+
+    // 1. 🏆 Топ-5 лідерборду (Картинка-картка)
+    const resTop = {
+      type: 'photo',
+      id: 'top_leaderboard_' + cacheBuster,
+      title: '🏆 Топ-5 Лідерборду (Графічна картка)',
+      description: 'Красива картинка з найкращими пекарями серверу',
+      photo_url: lbImgUrl,
+      thumb_url: lbImgUrl,
+      caption:
+        `🏆 <b>Офіційний Топ-5 пекарів у Фокача Клікер!</b>\n\n` +
+        `🥇 1 місце — володар золотого звання пекаря!\n` +
+        `Змагайся з друзями, будуй пекарні та піднімайся на верхівку топу! 👇`,
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '🫓 Змагатися у Фокача Клікер', web_app: { url: WEBAPP_URL } }],
+        ],
+      },
+    };
+
+    // 2. ⚔️ Виклик на Дуель 1 на 1
+    const resDuel = {
+      type: 'article',
+      id: 'duel_invite_' + Date.now(),
+      title: '⚔️ Викликати на Дуель 1 на 1',
+      description: 'Кинути виклик другу на швидкісний клік-батл у чаті',
+      thumb_url: 'https://nout0688-cloud.github.io/focaccia-clicker/focaccia-192.png',
+      input_message_content: {
+        message_text:
+          `⚔️ <b>Бійцівський виклик від ${escapeHtml(creatorName)}!</b>\n\n` +
+          `🔥 <i>«Хто швидше клікає? Доведи свою майстерність або поступися!»</i>\n\n` +
+          `🎯 <b>Формат:</b> PvP-битва 1 на 1 у реальному часі\n` +
+          `🏆 <b>Ставки:</b> Фокачі 🫓 або Алмази 💎\n\n` +
+          `<i>Натисніть кнопку нижче, щоб прийняти бій:</i>`,
+        parse_mode: 'HTML',
+      },
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '⚔️ Прийняти дуель!', web_app: { url: 'https://nout0688-cloud.github.io/focaccia-clicker/?v=1.4.0&duel=lobby' } }],
+        ],
+      },
+    };
+
+    // 3. 🤝 Пряме запрошення в Трейд
+    const resTrade = {
+      type: 'article',
+      id: 'trade_invite_' + Date.now(),
+      title: '🤝 Запросити в кімнату обміну (Трейд)',
+      description: 'Обмінятися фокачами, алмазами та рідкісними скінами',
+      thumb_url: 'https://nout0688-cloud.github.io/focaccia-clicker/focaccia-192.png',
+      input_message_content: {
+        message_text:
+          `🤝 <b>Запрошення до обміну від ${escapeHtml(creatorName)}!</b>\n\n` +
+          `📦 <b>У кімнаті обміну можна передавати:</b>\n` +
+          `• 🫓 Фокачі будь-якої кількості\n` +
+          `• 💎 Алмази\n` +
+          `• 🎨 Ексклюзивні скіни фокач та котиків\n\n` +
+          `<i>Натисніть кнопку нижче, щоб увійти в кімнату:</i>`,
+        parse_mode: 'HTML',
+      },
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '🤝 Увійти в трейд', web_app: { url: 'https://nout0688-cloud.github.io/focaccia-clicker/?v=1.4.0&trade=lobby' } }],
+        ],
+      },
+    };
+
+    // 4. 📇 Мій профіль та рекорди
+    let myTotal = 0;
+    let myPrestige = 0;
+    let myDiamonds = 0;
+    let myClicks = 0;
+    let myBosses = 0;
+    try {
+      const lbUser = await redis('HGET', 'leaderboard', String(fromUser.id));
+      if (lbUser?.result) {
+        const uObj = JSON.parse(lbUser.result);
+        myTotal = Number(uObj.t) || 0;
+        myPrestige = parseInt(uObj.p, 10) || 0;
+        myDiamonds = parseInt(uObj.d, 10) || 0;
+        myClicks = Number(uObj.k) || 0;
+        myBosses = Number(uObj.b) || 0;
+      }
+    } catch {}
+
+    const resProfile = {
+      type: 'article',
+      id: 'my_profile_' + fromUser.id,
+      title: '📇 Мій профіль та рекорди',
+      description: `Показати свої рекорди: ${formatNum(myTotal)} 🫓 • Престиж ${myPrestige}`,
+      thumb_url: 'https://nout0688-cloud.github.io/focaccia-clicker/focaccia-192.png',
+      input_message_content: {
+        message_text:
+          `👑 <b>Профіль пекаря: ${escapeHtml(creatorName)}</b> ${creatorUsername ? `(${creatorUsername})` : ''}\n\n` +
+          `🫓 <b>Всього спечено:</b> <code>${formatNum(myTotal)}</code> фокач (${myTotal.toLocaleString()})\n` +
+          `⭐ <b>Рівень престижу:</b> ${myPrestige}\n` +
+          `💎 <b>Алмази:</b> ${myDiamonds}\n` +
+          `👆 <b>Всього кліків:</b> <code>${formatNum(myClicks)}</code>\n` +
+          `👹 <b>Босів здолано:</b> ${myBosses}\n\n` +
+          `🫓 <i>Фокача Клікер — грай та спробуй побити мої рекорди!</i>`,
+        parse_mode: 'HTML',
+      },
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '🫓 Грати у Фокача Клікер', web_app: { url: WEBAPP_URL } }],
+        ],
+      },
+    };
+
+    // 5. 🥠 Печиво з передбаченням від Бабусі
+    const fortuneId = `ft_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const resFortune = {
+      type: 'article',
+      id: 'fortune_' + fortuneId,
+      title: '🥠 Печиво з передбаченням від Бабусі',
+      description: 'Хто перший розламає печиво в чаті — дізнається долю та отримає бонус!',
+      thumb_url: 'https://nout0688-cloud.github.io/focaccia-clicker/focaccia-192.png',
+      input_message_content: {
+        message_text:
+          `🥠 <b>Печиво з передбаченням від Бабусі!</b>\n\n` +
+          `👵 <i>«У кожному шматочку свіжої фокачі схована мудрість та удача...»</i>\n\n` +
+          `🎁 <b>Хто перший розламає печиво:</b>\n` +
+          `• Дізнається мудре або смішне передбачення на сьогодні!\n` +
+          `• Отримає бонус від <b>+500 до +5,000 🫓</b> (або <b>+1 💎</b>) собі на баланс!\n\n` +
+          `<i>Натисніть кнопку нижче, щоб розламати печиво:</i>`,
+        parse_mode: 'HTML',
+      },
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '🥠 Розламати печиво!', callback_data: `fortune:crack:${fortuneId}` }],
+        ],
+      },
+    };
+
+    // Пріоритет видачі відповідно до пошукового запиту
+    let results = [];
+    if (q.includes('топ') || q.includes('top') || q.includes('лідер') || q.includes('лидер')) {
+      results = [resTop, resProfile, resDuel, resTrade, resFortune];
+    } else if (q.includes('дуел') || q.includes('duel') || q.includes('бой') || q.includes('битв') || q.includes('пвп') || q.includes('pvp')) {
+      results = [resDuel, resTrade, resProfile, resTop, resFortune];
+    } else if (q.includes('трейд') || q.includes('trade') || q.includes('обмін') || q.includes('обмен')) {
+      results = [resTrade, resDuel, resProfile, resTop, resFortune];
+    } else if (q.includes('проф') || q.includes('стат') || q.includes('я') || q.includes('me') || q.includes('my')) {
+      results = [resProfile, resTop, resDuel, resTrade, resFortune];
+    } else if (q.includes('печив') || q.includes('печен') || q.includes('доля') || q.includes('бонус') || q.includes('фортун')) {
+      results = [resFortune, resProfile, resTop, resDuel, resTrade];
+    } else {
+      results = [resTop, resDuel, resTrade, resProfile, resFortune];
+    }
+
+    try {
+      await fetch(`https://api.telegram.org/bot${TOKEN}/answerInlineQuery`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          inline_query_id: iqId,
+          results,
+          cache_time: 1,
+          is_personal: true,
+        }),
+      });
+    } catch (e) {
+      console.error('Error answering inline query:', e);
+    }
+
+    return res.status(200).json({ ok: true });
+  }
 
   // 🧹 Автоматичне видалення застарілих повідомлень налаштування дуелей (>15 хв)
   await cleanupExpiredMessages(TOKEN);
@@ -3488,182 +3691,6 @@ module.exports = async function handler(req, res) {
       } catch (err) {
         console.error('Error sending purchase confirmation:', err);
       }
-
-      return res.status(200).json({ ok: true });
-    }
-
-    // ===== 🌟 TELEGRAM INLINE QUERY =====
-    if (update.inline_query) {
-      const iq = update.inline_query;
-      const iqId = iq.id;
-      const fromUser = iq.from;
-      const q = (iq.query || '').trim().toLowerCase();
-      const creatorName = [fromUser.first_name, fromUser.last_name].filter(Boolean).join(' ') || 'Гравець';
-      const creatorUsername = fromUser.username ? `@${fromUser.username}` : creatorName;
-      const host = req.headers.host || 'focaccia-bot.vercel.app';
-      const cacheBuster = Math.floor(Date.now() / 45000); // свіжа картинка кожні 45 секунд
-      const lbImgUrl = `https://${host}/api/leaderboard-image?v=${cacheBuster}`;
-
-      // 1. 🏆 Топ-5 лідерборду (Картинка-картка)
-      const resTop = {
-        type: 'photo',
-        id: 'top_leaderboard_' + cacheBuster,
-        title: '🏆 Топ-5 Лідерборду (Графічна картка)',
-        description: 'Красива картинка з найкращими пекарями серверу',
-        photo_url: lbImgUrl,
-        thumb_url: lbImgUrl,
-        caption:
-          `🏆 <b>Офіційний Топ-5 пекарів у Фокача Клікер!</b>\n\n` +
-          `🥇 1 місце — володар золотого звання пекаря!\n` +
-          `Змагайся з друзями, будуй пекарні та піднімайся на верхівку топу! 👇`,
-        parse_mode: 'HTML',
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: '🫓 Змагатися у Фокача Клікер', web_app: { url: WEBAPP_URL } }],
-          ],
-        },
-      };
-
-      // 2. ⚔️ Виклик на Дуель 1 на 1
-      const resDuel = {
-        type: 'article',
-        id: 'duel_invite_' + Date.now(),
-        title: '⚔️ Викликати на Дуель 1 на 1',
-        description: 'Кинути виклик другу на швидкісний клік-батл у чаті',
-        thumb_url: 'https://nout0688-cloud.github.io/focaccia-clicker/focaccia-192.png',
-        input_message_content: {
-          message_text:
-            `⚔️ <b>Бійцівський виклик від ${escapeHtml(creatorName)}!</b>\n\n` +
-            `🔥 <i>«Хто швидше клікає? Доведи свою майстерність або поступися!»</i>\n\n` +
-            `🎯 <b>Формат:</b> PvP-битва 1 на 1 у реальному часі\n` +
-            `🏆 <b>Ставки:</b> Фокачі 🫓 або Алмази 💎\n\n` +
-            `<i>Натисніть кнопку нижче, щоб прийняти бій:</i>`,
-          parse_mode: 'HTML',
-        },
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: '⚔️ Прийняти дуель!', web_app: { url: 'https://nout0688-cloud.github.io/focaccia-clicker/?v=1.4.0&duel=lobby' } }],
-          ],
-        },
-      };
-
-      // 3. 🤝 Пряме запрошення в Трейд
-      const resTrade = {
-        type: 'article',
-        id: 'trade_invite_' + Date.now(),
-        title: '🤝 Запросити в кімнату обміну (Трейд)',
-        description: 'Обмінятися фокачами, алмазами та рідкісними скінами',
-        thumb_url: 'https://nout0688-cloud.github.io/focaccia-clicker/focaccia-192.png',
-        input_message_content: {
-          message_text:
-            `🤝 <b>Запрошення до обміну від ${escapeHtml(creatorName)}!</b>\n\n` +
-            `📦 <b>У кімнаті обміну можна передавати:</b>\n` +
-            `• 🫓 Фокачі будь-якої кількості\n` +
-            `• 💎 Алмази\n` +
-            `• 🎨 Ексклюзивні скіни фокач та котиків\n\n` +
-            `<i>Натисніть кнопку нижче, щоб увійти в кімнату:</i>`,
-          parse_mode: 'HTML',
-        },
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: '🤝 Увійти в трейд', web_app: { url: 'https://nout0688-cloud.github.io/focaccia-clicker/?v=1.4.0&trade=lobby' } }],
-          ],
-        },
-      };
-
-      // 4. 📇 Мій профіль та рекорди
-      let myTotal = 0;
-      let myPrestige = 0;
-      let myDiamonds = 0;
-      let myClicks = 0;
-      let myBosses = 0;
-      try {
-        const lbUser = await redis('HGET', 'leaderboard', String(fromUser.id));
-        if (lbUser?.result) {
-          const uObj = JSON.parse(lbUser.result);
-          myTotal = Number(uObj.t) || 0;
-          myPrestige = parseInt(uObj.p, 10) || 0;
-          myDiamonds = parseInt(uObj.d, 10) || 0;
-          myClicks = Number(uObj.k) || 0;
-          myBosses = Number(uObj.b) || 0;
-        }
-      } catch {}
-
-      const resProfile = {
-        type: 'article',
-        id: 'my_profile_' + fromUser.id,
-        title: '📇 Мій профіль та рекорди',
-        description: `Показати свої рекорди: ${formatNum(myTotal)} 🫓 • Престиж ${myPrestige}`,
-        thumb_url: 'https://nout0688-cloud.github.io/focaccia-clicker/focaccia-192.png',
-        input_message_content: {
-          message_text:
-            `👑 <b>Профіль пекаря: ${escapeHtml(creatorName)}</b> ${creatorUsername ? `(${creatorUsername})` : ''}\n\n` +
-            `🫓 <b>Всього спечено:</b> <code>${formatNum(myTotal)}</code> фокач (${myTotal.toLocaleString()})\n` +
-            `⭐ <b>Рівень престижу:</b> ${myPrestige}\n` +
-            `💎 <b>Алмази:</b> ${myDiamonds}\n` +
-            `👆 <b>Всього кліків:</b> <code>${formatNum(myClicks)}</code>\n` +
-            `👹 <b>Босів здолано:</b> ${myBosses}\n\n` +
-            `🫓 <i>Фокача Клікер — грай та спробуй побити мої рекорди!</i>`,
-          parse_mode: 'HTML',
-        },
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: '🫓 Грати у Фокача Клікер', web_app: { url: WEBAPP_URL } }],
-          ],
-        },
-      };
-
-      // 5. 🥠 Печиво з передбаченням від Бабусі
-      const fortuneId = `ft_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-      const resFortune = {
-        type: 'article',
-        id: 'fortune_' + fortuneId,
-        title: '🥠 Печиво з передбаченням від Бабусі',
-        description: 'Хто перший розламає печиво в чаті — дізнається долю та отримає бонус!',
-        thumb_url: 'https://nout0688-cloud.github.io/focaccia-clicker/focaccia-192.png',
-        input_message_content: {
-          message_text:
-            `🥠 <b>Печиво з передбаченням від Бабусі!</b>\n\n` +
-            `👵 <i>«У кожному шматочку свіжої фокачі схована мудрість та удача...»</i>\n\n` +
-            `🎁 <b>Хто перший розламає печиво:</b>\n` +
-            `• Дізнається мудре або смішне передбачення на сьогодні!\n` +
-            `• Отримає бонус від <b>+500 до +5,000 🫓</b> (або <b>+1 💎</b>) собі на баланс!\n\n` +
-            `<i>Натисніть кнопку нижче, щоб розламати печиво:</i>`,
-          parse_mode: 'HTML',
-        },
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: '🥠 Розламати печиво!', callback_data: `fortune:crack:${fortuneId}` }],
-          ],
-        },
-      };
-
-      // Пріоритет видачі відповідно до пошукового запиту
-      let results = [];
-      if (q.includes('топ') || q.includes('top') || q.includes('лідер') || q.includes('лидер')) {
-        results = [resTop, resProfile, resDuel, resTrade, resFortune];
-      } else if (q.includes('дуел') || q.includes('duel') || q.includes('бой') || q.includes('битв') || q.includes('пвп') || q.includes('pvp')) {
-        results = [resDuel, resTrade, resProfile, resTop, resFortune];
-      } else if (q.includes('трейд') || q.includes('trade') || q.includes('обмін') || q.includes('обмен')) {
-        results = [resTrade, resDuel, resProfile, resTop, resFortune];
-      } else if (q.includes('проф') || q.includes('стат') || q.includes('я') || q.includes('me') || q.includes('my')) {
-        results = [resProfile, resTop, resDuel, resTrade, resFortune];
-      } else if (q.includes('печив') || q.includes('печен') || q.includes('доля') || q.includes('бонус') || q.includes('фортун')) {
-        results = [resFortune, resProfile, resTop, resDuel, resTrade];
-      } else {
-        results = [resTop, resDuel, resTrade, resProfile, resFortune];
-      }
-
-      await fetch(`https://api.telegram.org/bot${TOKEN}/answerInlineQuery`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          inline_query_id: iqId,
-          results,
-          cache_time: 1,
-          is_personal: true,
-        }),
-      }).catch((e) => console.error('Error answering inline query:', e));
 
       return res.status(200).json({ ok: true });
     }
