@@ -91,6 +91,15 @@ function escapeXml(str) {
 module.exports = async function handler(req, res) {
   try {
     await ensureFonts();
+    const u = new URL(req.url, 'http://localhost');
+    if (u.searchParams.get('debug')) {
+      return res.status(200).json({
+        fontRegular: !!fontRegular,
+        fontBold: !!fontBold,
+        regLen: fontRegular ? fontRegular.length : 0,
+        boldLen: fontBold ? fontBold.length : 0,
+      });
+    }
     const lbRaw = await redis('HGETALL', 'leaderboard');
     let players = [];
     if (lbRaw?.result && Array.isArray(lbRaw.result)) {
