@@ -1,8 +1,21 @@
-﻿/**
- * Dynamic Leaderboard Image Generator for Telegram
+/**
+ * Dynamic Leaderboard JPEG Image Generator for Telegram
  * GET /api/leaderboard-image
  */
+const fs = require('fs');
+const path = require('path');
 const { Resvg } = require('@resvg/resvg-js');
+const jpeg = require('jpeg-js');
+
+// Load fonts once into memory
+let fontRegular = null;
+let fontBold = null;
+try {
+  fontRegular = fs.readFileSync(path.join(__dirname, '../fonts/arial.ttf'));
+  fontBold = fs.readFileSync(path.join(__dirname, '../fonts/arialbd.ttf'));
+} catch (e) {
+  console.error('Error loading fonts:', e);
+}
 
 async function redis(...args) {
   const url = process.env.KV_REST_API_URL;
@@ -17,16 +30,16 @@ async function redis(...args) {
 }
 
 function formatNum(n) {
-  if (!n || isNaN(n)) return '0';
+  if (!n || isNaN(n) || !isFinite(n)) return '0';
   if (n < 1000) return String(Math.floor(n));
-  const units = ['', 'k', 'M', 'B', 'T', 'Qa', 'Qi'];
+  const units = ['', 'k', 'M', 'B', 'T', 'Qa', 'Qi', 'Sx', 'Sp', 'Oc', 'No', 'Dc'];
   let i = 0;
   let v = n;
   while (v >= 1000 && i < units.length - 1) {
     v /= 1000;
     i++;
   }
-  return `${v.toFixed(v < 10 ? 2 : v < 100 ? 1 : 0)}${units[i]}`;
+  return `${v.toFixed(v < 10 ? 1 : 0)} ${units[i]}`.trim();
 }
 
 function escapeXml(str) {
@@ -74,11 +87,11 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    const width = 920;
-    const height = 540;
-    const startY = 125;
+    const width = 960;
+    const height = 580;
+    const startY = 135;
     const rowH = 68;
-    const gap = 11;
+    const gap = 12;
 
     let rowsSvg = '';
     top5.forEach((p, i) => {
@@ -90,9 +103,9 @@ module.exports = async function handler(req, res) {
       const bgFill = isFirst
         ? 'rgba(245, 158, 11, 0.14)'
         : isSecond
-        ? 'rgba(148, 163, 184, 0.09)'
+        ? 'rgba(148, 163, 184, 0.10)'
         : isThird
-        ? 'rgba(217, 119, 6, 0.09)'
+        ? 'rgba(217, 119, 6, 0.10)'
         : 'rgba(255, 255, 255, 0.04)';
 
       const strokeColor = isFirst
@@ -104,24 +117,47 @@ module.exports = async function handler(req, res) {
         : 'rgba(255, 255, 255, 0.08)';
 
       const strokeWidth = isFirst ? 2 : 1;
-      const rankBadge = isFirst ? '🥇 #1' : isSecond ? '🥈 #2' : isThird ? '🥉 #3' : `  #${i + 1}`;
-      const rankColor = isFirst ? '#fde047' : isSecond ? '#f1f5f9' : isThird ? '#fbbf24' : '#64748b';
+      const rankBadge = isFirst ? '1' : isSecond ? '2' : isThird ? '3' : `${i + 1}`;
+      const rankBadgeBg = isFirst ? '#f59e0b' : isSecond ? '#94a3b8' : isThird ? '#d97706' : '#334155';
+      const rankBadgeText = isFirst ? '#000000' : isSecond ? '#000000' : isThird ? '#ffffff' : '#94a3b8';
 
-      const safeName = escapeXml(p.name.slice(0, 20));
-      const handle = p.username ? ` (@${escapeXml(p.username.slice(0, 14))})` : '';
-      const totalStr = `${formatNum(p.total)} 🫓`;
-      const prestigeStr = p.prestige > 0 ? `★ ${p.prestige}` : '';
+      const safeName = escapeXml(p.name.slice(0, 18));
+      const handle = p.username ? ` (@${escapeXml(p.username.slice(0, 16))})` : '';
+      const totalStr = `${formatNum(p.total)}`;
+      const prestigeStr = p.prestige > 0 ? `★ ${p.prestige.toLocaleString()}` : '';
 
       rowsSvg += `
-        <rect x="50" y="${y}" width="820" height="${rowH}" rx="16" fill="${bgFill}" stroke="${strokeColor}" stroke-width="${strokeWidth}"/>
-        <text x="80" y="${y + 42}" fill="${rankColor}" font-family="system-ui, -apple-system, sans-serif" font-size="22" font-weight="800">${rankBadge}</text>
-        <text x="180" y="${y + 42}" fill="#f8fafc" font-family="system-ui, -apple-system, sans-serif" font-size="20" font-weight="700">${safeName}<tspan fill="#94a3b8" font-size="15" font-weight="500">${handle}</tspan></text>
-        ${prestigeStr ? `<text x="560" y="${y + 42}" fill="#c084fc" font-family="system-ui, -apple-system, sans-serif" font-size="16" font-weight="700">${prestigeStr}</text>` : ''}
-        <text x="840" y="${y + 42}" text-anchor="end" fill="#f59e0b" font-family="system-ui, -apple-system, sans-serif" font-size="22" font-weight="800">${totalStr}</text>
+        <rect x="50" y="${y}" width="860" height="${rowH}" rx="18" fill="${bgFill}" stroke="${strokeColor}" stroke-width="${strokeWidth}"/>
+        
+        <!-- Rank Pill -->
+        <rect x="70" y="${y + 16}" width="42" height="36" rx="10" fill="${rankBadgeBg}"/>
+        <text x="91" y="${y + 42}" text-anchor="middle" fill="${rankBadgeText}" font-family="Arial" font-size="20" font-weight="bold">${rankBadge}</text>
+        
+        <!-- Player Info with tspan -->
+        <text x="130" y="${y + 43}" font-family="Arial">
+          <tspan fill="#f8fafc" font-size="22" font-weight="bold">${safeName}</tspan>
+          ${handle ? `<tspan fill="#94a3b8" font-size="16">   ${handle}</tspan>` : ''}
+        </text>
+        
+        <!-- Prestige -->
+        ${prestigeStr ? `
+          <rect x="560" y="${y + 19}" width="125" height="30" rx="8" fill="rgba(168, 85, 247, 0.15)" stroke="rgba(168, 85, 247, 0.4)" stroke-width="1"/>
+          <text x="622" y="${y + 39}" text-anchor="middle" fill="#c084fc" font-family="Arial" font-size="14" font-weight="bold">${prestigeStr}</text>
+        ` : ''}
+
+        <!-- Total Score + Golden Focaccia SVG Icon -->
+        <text x="855" y="${y + 43}" text-anchor="end" fill="#f59e0b" font-family="Arial" font-size="23" font-weight="bold">${totalStr}</text>
+        <g transform="translate(865, ${y + 24})">
+          <ellipse cx="14" cy="10" rx="13" ry="9" fill="#f59e0b" stroke="#fbbf24" stroke-width="1.5"/>
+          <circle cx="9" cy="8" r="1.5" fill="#78350f"/>
+          <circle cx="14" cy="11" r="1.5" fill="#78350f"/>
+          <circle cx="19" cy="8" r="1.5" fill="#78350f"/>
+        </g>
       `;
     });
 
-    const svg = `<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">
+    const svg = `
+    <svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">
       <defs>
         <linearGradient id="mainBg" x1="0%" y1="0%" x2="100%" y2="100%">
           <stop offset="0%" stop-color="#0b0f19"/>
@@ -138,31 +174,44 @@ module.exports = async function handler(req, res) {
       <!-- Background -->
       <rect width="100%" height="100%" fill="url(#mainBg)"/>
 
-      <!-- Ambient glow lights -->
-      <circle cx="180" cy="90" r="220" fill="#f59e0b" opacity="0.12"/>
-      <circle cx="760" cy="420" r="240" fill="#6366f1" opacity="0.12"/>
+      <!-- Ambient Glow -->
+      <circle cx="150" cy="80" r="200" fill="#f59e0b" opacity="0.10"/>
+      <circle cx="800" cy="450" r="220" fill="#6366f1" opacity="0.12"/>
 
-      <!-- Title Header -->
-      <text x="460" y="58" text-anchor="middle" fill="url(#goldText)" font-family="system-ui, -apple-system, sans-serif" font-size="32" font-weight="900" letter-spacing="2">🏆 ТОП-5 НАЙКРАЩИХ ПЕКАРІВ 🫓</text>
-      <text x="460" y="90" text-anchor="middle" fill="#94a3b8" font-family="system-ui, -apple-system, sans-serif" font-size="16" font-weight="600">Офіційний лідерборд Фокача Клікер • Оновлюється в реальному часі</text>
+      <!-- Main Title -->
+      <text x="480" y="62" text-anchor="middle" fill="url(#goldText)" font-family="Arial" font-size="36" font-weight="bold" letter-spacing="3">ТОП ПО ФОКАЧІ 2026</text>
+      <text x="480" y="98" text-anchor="middle" fill="#94a3b8" font-family="Arial" font-size="16">Офіційний рейтинг пекарів серверу • Оновлюється в реальному часі</text>
 
-      <!-- Leaderboard rows -->
+      <!-- Rows -->
       ${rowsSvg}
 
       <!-- Footer -->
-      <text x="460" y="518" text-anchor="middle" fill="#64748b" font-family="system-ui, -apple-system, sans-serif" font-size="13" font-weight="500">t.me/focaccia_clicker_bot • Змагайся та піднімайся на перше місце!</text>
-    </svg>`;
+      <text x="480" y="555" text-anchor="middle" fill="#64748b" font-family="Arial" font-size="13">@focaca_robot • Випікай фокачі та побий рекорд першого місця!</text>
+    </svg>
+    `;
 
-    const resvg = new Resvg(svg, {
+    const resvgOptions = {
       font: {
-        loadSystemFonts: true,
+        defaultFontFamily: 'Arial',
       },
-    });
-    const pngBuffer = resvg.render().asPng();
+    };
+    if (fontRegular && fontBold) {
+      resvgOptions.font.fontBuffers = [fontRegular, fontBold];
+    } else {
+      resvgOptions.font.loadSystemFonts = true;
+    }
 
-    res.setHeader('Content-Type', 'image/png');
+    const resvg = new Resvg(svg, resvgOptions);
+    const renderObj = resvg.render();
+    const jpegData = jpeg.encode({
+      data: renderObj.pixels,
+      width: renderObj.width,
+      height: renderObj.height,
+    }, 90);
+
+    res.setHeader('Content-Type', 'image/jpeg');
     res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=60');
-    return res.status(200).end(pngBuffer);
+    return res.status(200).end(jpegData.data);
   } catch (err) {
     console.error('Error generating leaderboard image:', err);
     return res.status(500).json({ error: err.message });

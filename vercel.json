@@ -1,5 +1,8 @@
 {
   "version": 2,
+  "rewrites": [
+    { "source": "/api/leaderboard-image.jpg", "destination": "/api/leaderboard-image" }
+  ],
   "crons": [
     {
       "path": "/api/remind",

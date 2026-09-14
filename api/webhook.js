@@ -3436,59 +3436,19 @@ module.exports = async function handler(req, res) {
     const creatorUsername = fromUser.username ? `@${fromUser.username}` : creatorName;
     const host = req.headers.host || 'focaccia-bot.vercel.app';
     const cacheBuster = Math.floor(Date.now() / 30000);
-    const lbImgUrl = `https://${host}/api/leaderboard-image?v=${cacheBuster}`;
+    const lbImgUrl = `https://${host}/api/leaderboard-image.jpg?v=${cacheBuster}`;
 
-    // 1. 🏆 Топ-5 лідерборду (Графічна картка + рейтинг)
-    let topText = '';
-    try {
-      const lbPromise = redis('HGETALL', 'leaderboard');
-      const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve(null), 1200));
-      const lbRaw = await Promise.race([lbPromise, timeoutPromise]);
-      if (lbRaw?.result && Array.isArray(lbRaw.result)) {
-        let players = [];
-        for (let i = 0; i < lbRaw.result.length; i += 2) {
-          try {
-            const p = JSON.parse(lbRaw.result[i + 1]);
-            if (p.n && !p.n.includes('\uFFFD')) {
-              players.push({
-                name: p.n,
-                username: p.u || '',
-                total: Number(p.t) || 0,
-                prestige: parseInt(p.p, 10) || 0,
-              });
-            }
-          } catch {}
-        }
-        players.sort((a, b) => b.total - a.total);
-        const top5 = players.slice(0, 5);
-        const medals = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣'];
-        topText = top5.map((p, idx) => {
-          const uStr = p.username ? ` (@${escapeHtml(p.username)})` : '';
-          return `${medals[idx]} <b>${escapeHtml(p.name)}</b>${uStr} — <code>${formatNum(p.total)}</code> 🫓 (Престиж ${p.prestige})`;
-        }).join('\n');
-      }
-    } catch (e) {
-      console.error('Error fetching leaderboard for inline:', e);
-    }
-
+    // 1. 🏆 ТОП ПО ФОКАЧІ 2026 (Тільки графічна фото-картка)
     const resTop = {
-      type: 'article',
+      type: 'photo',
       id: 'top_leaderboard_' + cacheBuster,
-      title: '🏆 Топ-5 Лідерборду (Картка та рейтинг)',
-      description: 'Найкращі пекарі серверу Фокача Клікер',
-      thumbnail_url: 'https://nout0688-cloud.github.io/focaccia-clicker/focaccia-192.png',
-      thumb_url: 'https://nout0688-cloud.github.io/focaccia-clicker/focaccia-192.png',
-      input_message_content: {
-        message_text:
-          `<a href="${lbImgUrl}">&#8205;</a>` +
-          `🏆 <b>Офіційний Топ-5 пекарів у Фокача Клікер!</b>\n\n` +
-          (topText ? `${topText}\n\n` : '') +
-          `🔥 <i>Змагайся з друзями, випікай фокачі та піднімайся на вершину рейтингу!</i>`,
-        parse_mode: 'HTML',
-      },
+      title: '🏆 ТОП ПО ФОКАЧІ 2026',
+      description: 'Графічна фото-картка найкращих пекарів сервера',
+      photo_url: lbImgUrl,
+      thumbnail_url: lbImgUrl,
       reply_markup: {
         inline_keyboard: [
-          [{ text: '🫓 Відкрити бота', url: 'https://t.me/focaca_robot' }],
+          [{ text: '🫓 Грати у Фокача Клікер', url: 'https://t.me/focaca_robot' }],
         ],
       },
     };
