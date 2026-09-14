@@ -7,52 +7,6 @@ const path = require('path');
 const { Resvg } = require('@resvg/resvg-js');
 const jpeg = require('jpeg-js');
 
-// Load fonts once into memory with robust fallback
-let fontRegular = null;
-let fontBold = null;
-
-function loadLocalFont(filename) {
-  const possiblePaths = [
-    path.join(__dirname, 'fonts', filename),
-    path.join(__dirname, '../fonts', filename),
-    path.join(process.cwd(), 'api/fonts', filename),
-    path.join(process.cwd(), 'fonts', filename),
-  ];
-  for (const p of possiblePaths) {
-    try {
-      if (fs.existsSync(p)) {
-        return fs.readFileSync(p);
-      }
-    } catch {}
-  }
-  return null;
-}
-
-async function ensureFonts() {
-  if (!fontRegular) fontRegular = loadLocalFont('arial.ttf');
-  if (!fontBold) fontBold = loadLocalFont('arialbd.ttf');
-
-  if (!fontRegular) {
-    try {
-      const buf = await fetch('https://raw.githubusercontent.com/google/fonts/main/ofl/roboto/Roboto-Regular.ttf')
-        .then(r => r.arrayBuffer());
-      fontRegular = Buffer.from(buf);
-    } catch (e) {
-      console.error('Failed to fetch fallback regular font:', e);
-    }
-  }
-
-  if (!fontBold) {
-    try {
-      const buf = await fetch('https://raw.githubusercontent.com/google/fonts/main/ofl/roboto/Roboto-Bold.ttf')
-        .then(r => r.arrayBuffer());
-      fontBold = Buffer.from(buf);
-    } catch (e) {
-      console.error('Failed to fetch fallback bold font:', e);
-    }
-  }
-}
-
 async function redis(...args) {
   const url = process.env.KV_REST_API_URL;
   const token = process.env.KV_REST_API_TOKEN;
@@ -78,6 +32,13 @@ function formatNum(n) {
   return `${v.toFixed(v < 10 ? 1 : 0)} ${units[i]}`.trim();
 }
 
+function normalizeName(str) {
+  if (!str) return 'Пекар';
+  let norm = String(str).normalize('NFKD');
+  norm = norm.replace(/[^\p{L}\p{N}\p{P}\p{Z}]/gu, '').trim();
+  return norm || 'Пекар';
+}
+
 function escapeXml(str) {
   if (!str) return '';
   return String(str)
@@ -90,16 +51,6 @@ function escapeXml(str) {
 
 module.exports = async function handler(req, res) {
   try {
-    await ensureFonts();
-    const u = new URL(req.url, 'http://localhost');
-    if (u.searchParams.get('debug')) {
-      return res.status(200).json({
-        fontRegular: !!fontRegular,
-        fontBold: !!fontBold,
-        regLen: fontRegular ? fontRegular.length : 0,
-        boldLen: fontBold ? fontBold.length : 0,
-      });
-    }
     const lbRaw = await redis('HGETALL', 'leaderboard');
     let players = [];
     if (lbRaw?.result && Array.isArray(lbRaw.result)) {
@@ -108,7 +59,7 @@ module.exports = async function handler(req, res) {
           const p = JSON.parse(lbRaw.result[i + 1]);
           if (p.n && !p.n.includes('\uFFFD')) {
             players.push({
-              name: p.n,
+              name: normalizeName(p.n),
               username: p.u || '',
               total: Number(p.t) || 0,
               prestige: parseInt(p.p, 10) || 0,
@@ -236,18 +187,34 @@ module.exports = async function handler(req, res) {
     </svg>
     `;
 
-    const resvgOptions = {
-      font: {
-        defaultFontFamily: 'Arial',
-      },
-    };
-    if (fontRegular && fontBold) {
-      resvgOptions.font.fontBuffers = [fontRegular, fontBold];
-    } else {
-      resvgOptions.font.loadSystemFonts = true;
-    }
+    // Locate font files robustly
+    const fontCandidates = [
+      path.join(__dirname, 'fonts/arial.ttf'),
+      path.join(__dirname, 'fonts/arialbd.ttf'),
+      path.join(__dirname, '../fonts/arial.ttf'),
+      path.join(__dirname, '../fonts/arialbd.ttf'),
+      path.join(process.cwd(), 'api/fonts/arial.ttf'),
+      path.join(process.cwd(), 'api/fonts/arialbd.ttf'),
+      path.join(process.cwd(), 'fonts/arial.ttf'),
+      path.join(process.cwd(), 'fonts/arialbd.ttf'),
+    ];
+    const existingFonts = fontCandidates.filter(p => {
+      try { return fs.existsSync(p); } catch { return false; }
+    });
 
-    const resvg = new Resvg(svg, resvgOptions);
+    const resvg = new Resvg(svg, {
+      font: {
+        fontFiles: existingFonts,
+        fontDirs: [
+          path.join(__dirname, 'fonts'),
+          path.join(process.cwd(), 'api/fonts'),
+          path.join(process.cwd(), 'fonts'),
+        ],
+        defaultFontFamily: 'Arial',
+        loadSystemFonts: false,
+      },
+    });
+
     const renderObj = resvg.render();
     const jpegData = jpeg.encode({
       data: renderObj.pixels,
@@ -256,7 +223,7 @@ module.exports = async function handler(req, res) {
     }, 90);
 
     res.setHeader('Content-Type', 'image/jpeg');
-    res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=60');
+    res.setHeader('Cache-Control', 'public, max-age=5, s-maxage=5');
     return res.status(200).end(jpegData.data);
   } catch (err) {
     console.error('Error generating leaderboard image:', err);
