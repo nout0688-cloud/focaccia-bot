@@ -220,11 +220,13 @@ module.exports = async function handler(req, res) {
       data: renderObj.pixels,
       width: renderObj.width,
       height: renderObj.height,
-    }, 90);
+    }, 85);
+    const buf = Buffer.from(jpegData.data);
 
     res.setHeader('Content-Type', 'image/jpeg');
+    res.setHeader('Content-Length', buf.length);
     res.setHeader('Cache-Control', 'public, max-age=5, s-maxage=5');
-    return res.status(200).end(jpegData.data);
+    return res.status(200).end(buf);
   } catch (err) {
     console.error('Error generating leaderboard image:', err);
     return res.status(500).json({ error: err.message });

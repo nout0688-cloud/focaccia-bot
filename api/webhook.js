@@ -3446,6 +3446,8 @@ module.exports = async function handler(req, res) {
       description: 'Графічна фото-картка найкращих пекарів сервера',
       photo_url: lbImgUrl,
       thumbnail_url: lbImgUrl,
+      photo_width: 960,
+      photo_height: 580,
       reply_markup: {
         inline_keyboard: [
           [{ text: '🫓 Грати у Фокача Клікер', url: 'https://t.me/focaca_robot' }],
