@@ -121,7 +121,7 @@ module.exports = async function handler(req, res) {
       const safeName = escapeXml(p.name.slice(0, 18));
       const handle = p.username ? ` (@${escapeXml(p.username.slice(0, 16))})` : '';
       const totalStr = `${formatNum(p.total)}`;
-      const prestigeStr = p.prestige > 0 ? `★ ${p.prestige.toLocaleString()}` : '';
+      const prestigeStr = p.prestige > 0 ? `Престиж ${p.prestige.toLocaleString()}` : '';
 
       rowsSvg += `
         <rect x="50" y="${y}" width="860" height="${rowH}" rx="18" fill="${bgFill}" stroke="${strokeColor}" stroke-width="${strokeWidth}"/>
@@ -138,8 +138,8 @@ module.exports = async function handler(req, res) {
         
         <!-- Prestige -->
         ${prestigeStr ? `
-          <rect x="560" y="${y + 19}" width="125" height="30" rx="8" fill="rgba(168, 85, 247, 0.15)" stroke="rgba(168, 85, 247, 0.4)" stroke-width="1"/>
-          <text x="622" y="${y + 39}" text-anchor="middle" fill="#c084fc" font-family="Arial" font-size="14" font-weight="bold">${prestigeStr}</text>
+          <rect x="535" y="${y + 19}" width="150" height="30" rx="8" fill="rgba(168, 85, 247, 0.15)" stroke="rgba(168, 85, 247, 0.4)" stroke-width="1"/>
+          <text x="610" y="${y + 39}" text-anchor="middle" fill="#c084fc" font-family="Arial" font-size="14" font-weight="bold">${prestigeStr}</text>
         ` : ''}
 
         <!-- Total Score + Golden Focaccia SVG Icon -->
