@@ -7,14 +7,50 @@ const path = require('path');
 const { Resvg } = require('@resvg/resvg-js');
 const jpeg = require('jpeg-js');
 
-// Load fonts once into memory
+// Load fonts once into memory with robust fallback
 let fontRegular = null;
 let fontBold = null;
-try {
-  fontRegular = fs.readFileSync(path.join(__dirname, '../fonts/arial.ttf'));
-  fontBold = fs.readFileSync(path.join(__dirname, '../fonts/arialbd.ttf'));
-} catch (e) {
-  console.error('Error loading fonts:', e);
+
+function loadLocalFont(filename) {
+  const possiblePaths = [
+    path.join(__dirname, 'fonts', filename),
+    path.join(__dirname, '../fonts', filename),
+    path.join(process.cwd(), 'api/fonts', filename),
+    path.join(process.cwd(), 'fonts', filename),
+  ];
+  for (const p of possiblePaths) {
+    try {
+      if (fs.existsSync(p)) {
+        return fs.readFileSync(p);
+      }
+    } catch {}
+  }
+  return null;
+}
+
+async function ensureFonts() {
+  if (!fontRegular) fontRegular = loadLocalFont('arial.ttf');
+  if (!fontBold) fontBold = loadLocalFont('arialbd.ttf');
+
+  if (!fontRegular) {
+    try {
+      const buf = await fetch('https://raw.githubusercontent.com/google/fonts/main/ofl/roboto/Roboto-Regular.ttf')
+        .then(r => r.arrayBuffer());
+      fontRegular = Buffer.from(buf);
+    } catch (e) {
+      console.error('Failed to fetch fallback regular font:', e);
+    }
+  }
+
+  if (!fontBold) {
+    try {
+      const buf = await fetch('https://raw.githubusercontent.com/google/fonts/main/ofl/roboto/Roboto-Bold.ttf')
+        .then(r => r.arrayBuffer());
+      fontBold = Buffer.from(buf);
+    } catch (e) {
+      console.error('Failed to fetch fallback bold font:', e);
+    }
+  }
 }
 
 async function redis(...args) {
@@ -54,6 +90,7 @@ function escapeXml(str) {
 
 module.exports = async function handler(req, res) {
   try {
+    await ensureFonts();
     const lbRaw = await redis('HGETALL', 'leaderboard');
     let players = [];
     if (lbRaw?.result && Array.isArray(lbRaw.result)) {

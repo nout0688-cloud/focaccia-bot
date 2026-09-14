@@ -1,5 +1,10 @@
 {
   "version": 2,
+  "functions": {
+    "api/**/*.js": {
+      "includeFiles": "api/fonts/**"
+    }
+  },
   "rewrites": [
     { "source": "/api/leaderboard-image.jpg", "destination": "/api/leaderboard-image" }
   ],
