@@ -3545,46 +3545,18 @@ module.exports = async function handler(req, res) {
       },
     };
 
-    // 5. 🥠 Печиво з передбаченням від Бабусі
-    const fortuneId = `ft_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-    const resFortune = {
-      type: 'article',
-      id: 'fortune_' + fortuneId,
-      title: '🥠 Печиво з передбаченням від Бабусі',
-      description: 'Хто перший розламає печиво в чаті — дізнається долю та отримає бонус!',
-      thumbnail_url: 'https://nout0688-cloud.github.io/focaccia-clicker/focaccia-192.png',
-      thumb_url: 'https://nout0688-cloud.github.io/focaccia-clicker/focaccia-192.png',
-      input_message_content: {
-        message_text:
-          `🥠 <b>Печиво з передбаченням від Бабусі!</b>\n\n` +
-          `👵 <i>«У кожному шматочку свіжої фокачі схована мудрість та удача...»</i>\n\n` +
-          `🎁 <b>Хто перший розламає печиво:</b>\n` +
-          `• Дізнається мудре або смішне передбачення на сьогодні!\n` +
-          `• Отримає бонус від <b>+500 до +5,000 🫓</b> (або <b>+1 💎</b>) собі на баланс!\n\n` +
-          `<i>Натисніть кнопку нижче, щоб розламати печиво:</i>`,
-        parse_mode: 'HTML',
-      },
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: '🥠 Розламати печиво!', callback_data: `fortune:crack:${fortuneId}` }],
-        ],
-      },
-    };
-
     // Пріоритет видачі відповідно до пошукового запиту
     let results = [];
     if (q.includes('топ') || q.includes('top') || q.includes('лідер') || q.includes('лидер')) {
-      results = [resTop, resProfile, resDuel, resTrade, resFortune];
+      results = [resTop, resProfile, resDuel, resTrade];
     } else if (q.includes('дуел') || q.includes('duel') || q.includes('бой') || q.includes('битв') || q.includes('пвп') || q.includes('pvp')) {
-      results = [resDuel, resTrade, resProfile, resTop, resFortune];
+      results = [resDuel, resTrade, resProfile, resTop];
     } else if (q.includes('трейд') || q.includes('trade') || q.includes('обмін') || q.includes('обмен')) {
-      results = [resTrade, resDuel, resProfile, resTop, resFortune];
+      results = [resTrade, resDuel, resProfile, resTop];
     } else if (q.includes('проф') || q.includes('стат') || q.includes('я') || q.includes('me') || q.includes('my')) {
-      results = [resProfile, resTop, resDuel, resTrade, resFortune];
-    } else if (q.includes('печив') || q.includes('печен') || q.includes('доля') || q.includes('бонус') || q.includes('фортун')) {
-      results = [resFortune, resProfile, resTop, resDuel, resTrade];
+      results = [resProfile, resTop, resDuel, resTrade];
     } else {
-      results = [resTop, resDuel, resTrade, resProfile, resFortune];
+      results = [resTop, resDuel, resTrade, resProfile];
     }
 
     try {
@@ -3731,105 +3703,7 @@ module.exports = async function handler(req, res) {
     // ===== ⚔️ ДУЭЛИ: inline-кнопки =====
     const cq = update.callback_query;
 
-    // ===== 🥠 ПЕЧИВО З ПЕРЕДБАЧЕННЯМ (Inline Callback) =====
-    if (cq && typeof cq.data === 'string' && cq.data.startsWith('fortune:')) {
-      const parts = cq.data.split(':');
-      const fAction = parts[1];
-      const fortuneId = parts[2];
-      const clickerId = String(cq.from.id);
-      const clickerName = [cq.from.first_name, cq.from.last_name].filter(Boolean).join(' ') || 'Гравець';
-      const clickerUsername = cq.from.username ? `@${cq.from.username}` : clickerName;
 
-      if (fAction === 'crack') {
-        const lock = await redis('SET', `fortune_cracked:${fortuneId}`, clickerId, 'NX', 'EX', 86400);
-        if (!lock?.result) {
-          await fetch(`https://api.telegram.org/bot${TOKEN}/answerCallbackQuery`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              callback_query_id: cq.id,
-              text: '🥠 Це печиво вже розламали! Спробуй надіслати нове через @bot',
-              show_alert: true,
-            }),
-          });
-          return res.status(200).json({ ok: true });
-        }
-
-        const FORTUNE_PROPHECIES = [
-          "Хто зранку тапає фокачу — той увечері рахує мільйони!",
-          "Бабуся каже: гаряча фокача — до раптового багатства!",
-          "Сьогодні твої пальці будуть швидшими за вітер. Час для рекорду!",
-          "Бачу великий урожай золотих фокач на твоєму шляху!",
-          "Сьогодні зірки зійшлися так, що крити x10 летітимуть прямо в руки!",
-          "Не бійся босів — справжній пекар має качалку міцнішу за титан!",
-          "Удача посміхнеться тому, хто не забуває гладити Мурчика!",
-          "Великі олігархи теж колись починали з одного кліка!",
-          "Бабусине благословення з тобою: дохід пекарень збільшується!",
-          "Хто ділиться фокачами з друзями — тому вернеться в стократ!",
-          "Сьогодні день для переродження: престиж і слава кличуть тебе!",
-          "Обережно: надто смачна фокача викликає непереборне бажання клікати!",
-          "Твоя карма чиста, немов борошно найвищого ґатунку!",
-          "Бабуся спекла тобі окремий шматочок з родзинкою на удачу!",
-          "Сьогодні той самий день, коли варто зайти в казино й забрати джекпот!",
-          "Твоя енергія невичерпна — сьогодні поб'єш комбо x100!",
-          "Бачу в твоїй долі багато сяючих алмазів і золотий скін!",
-          "Справжній майстер знає: хрустка скоринка — запорука успіху!",
-          "Хто рано встає — тому духовка мільйон фокач напече!",
-          "Бабуся гордиться тобою — ти найкращий онук-пекар у світі!"
-        ];
-
-        const randomProphecy = FORTUNE_PROPHECIES[Math.floor(Math.random() * FORTUNE_PROPHECIES.length)];
-
-        // Визначаємо нагороду: 15% шанс на 1-2 алмази, 85% шанс на 1000-5000 фокач
-        const isGem = Math.random() < 0.15;
-        let rewardText = '';
-        if (isGem) {
-          const gems = Math.random() < 0.5 ? 1 : 2;
-          rewardText = `${gems} 💎`;
-          const ex = await redis('GET', `reward_gem:${clickerId}`);
-          const prev = ex?.result ? parseInt(ex.result, 10) : 0;
-          await redis('SET', `reward_gem:${clickerId}`, String(prev + gems));
-          await redis('SET', `reward_gem_source:${clickerId}`, 'fortune');
-        } else {
-          const focs = Math.floor(1000 + Math.random() * 4000);
-          rewardText = `${focs.toLocaleString()} 🫓`;
-          const ex = await redis('GET', `reward:${clickerId}`);
-          const prev = ex?.result ? parseInt(ex.result, 10) : 0;
-          await redis('SET', `reward:${clickerId}`, String(prev + focs));
-        }
-
-        // Оновлюємо інлайн-повідомлення в чаті
-        if (cq.inline_message_id) {
-          await sendTg(TOKEN, 'editMessageText', {
-            inline_message_id: cq.inline_message_id,
-            text:
-              `🥠 <b>Печиво розламав ${escapeHtml(clickerName)} (${escapeHtml(clickerUsername)})!</b>\n\n` +
-              `📜 <b>Передбачення від Бабусі:</b>\n` +
-              `<i>«${escapeHtml(randomProphecy)}»</i>\n\n` +
-              `🎁 <b>Нагорода з печива:</b> <b>+${rewardText}</b>\n\n` +
-              `🫓 <i>Відкривай Фокача Клікер, щоб отримати нагороду на баланс!</i>`,
-            parse_mode: 'HTML',
-            reply_markup: {
-              inline_keyboard: [
-                [{ text: '🫓 Відкрити Фокача Клікер', web_app: { url: WEBAPP_URL } }],
-              ],
-            },
-          }).catch(() => {});
-        }
-
-        await fetch(`https://api.telegram.org/bot${TOKEN}/answerCallbackQuery`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            callback_query_id: cq.id,
-            text: `🥠 «${randomProphecy}»\n\nТвоя нагорода: +${rewardText}! Зайди в гру, щоб отримати.`,
-            show_alert: true,
-          }),
-        });
-
-        return res.status(200).json({ ok: true });
-      }
-    }
 
     if (cq && typeof cq.data === 'string' && cq.data.startsWith('duel:')) {
       try {
