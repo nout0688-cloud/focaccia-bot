@@ -188,6 +188,11 @@ module.exports = async function handler(req, res) {
                 clicks: Number(lb.k) || 0,
                 bossesDefeated: Number(lb.b) || 0,
                 name: lb.n || '',
+                frame: lb.fr || 'frame_default',
+                color: lb.cl || 'name_default',
+                showcase: lb.sc || ['clicks', 'total', 'diamonds'],
+                ownedFrames: lb.ofr || ['frame_default'],
+                ownedColors: lb.ocl || ['name_default'],
               },
             });
           }

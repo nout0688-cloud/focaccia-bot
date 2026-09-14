@@ -319,6 +319,12 @@ module.exports = async function handler(req, res) {
       const showcase = Array.isArray(body.showcase) ? body.showcase.slice(0, 3) : (prev?.sc || ['clicks', 'total', 'diamonds']);
       const frame = String(body.frame || prev?.fr || 'frame_default').slice(0, 32);
       const color = String(body.color || prev?.cl || 'name_default').slice(0, 32);
+      const ownedFrames = Array.isArray(body.ownedFrames) && body.ownedFrames.length > 0
+        ? Array.from(new Set(['frame_default', ...body.ownedFrames.map(x => String(x).slice(0, 32)), ...(prev?.ofr || [])]))
+        : (prev?.ofr || ['frame_default']);
+      const ownedColors = Array.isArray(body.ownedColors) && body.ownedColors.length > 0
+        ? Array.from(new Set(['name_default', ...body.ownedColors.map(x => String(x).slice(0, 32)), ...(prev?.ocl || [])]))
+        : (prev?.ocl || ['name_default']);
       const rawAvatar = body.avatar || prev?.av || (username ? `https://t.me/i/userpic/320/${username}.jpg` : '');
       const avatar = String(rawAvatar || '').slice(0, 1024);
       await redis('HSET', 'leaderboard', userId, JSON.stringify({
@@ -333,6 +339,8 @@ module.exports = async function handler(req, res) {
         sc: showcase,
         fr: frame,
         cl: color,
+        ofr: ownedFrames,
+        ocl: ownedColors,
         av: avatar,
         rbt: lastRebirthTime || prev?.rbt || 0,
         ts: now
