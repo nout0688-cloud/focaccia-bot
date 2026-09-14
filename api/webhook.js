@@ -3379,12 +3379,19 @@ module.exports = async function handler(req, res) {
   const TOKEN = process.env.BOT_TOKEN;
 
   if (req.method !== 'POST') {
+    let action = null;
+    try {
+      const u = new URL(req.url, 'http://localhost');
+      action = u.searchParams.get('action');
+    } catch {}
+    if (!action && req.query) action = req.query.action;
+
     if (TOKEN) {
-      if (req.query?.action === 'get_webhook') {
+      if (action === 'get_webhook') {
         const info = await fetch(`https://api.telegram.org/bot${TOKEN}/getWebhookInfo`).then(r => r.json());
         return res.status(200).json(info);
       }
-      if (req.query?.action === 'fix_webhook') {
+      if (action === 'fix_webhook') {
         const setRes = await fetch(`https://api.telegram.org/bot${TOKEN}/setWebhook`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
