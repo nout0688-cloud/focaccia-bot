@@ -3387,6 +3387,10 @@ module.exports = async function handler(req, res) {
     if (!action && req.query) action = req.query.action;
 
     if (TOKEN) {
+      if (action === 'get_last_inline') {
+        const lastLog = await redis('GET', 'last_inline_log');
+        return res.status(200).json(lastLog?.result ? JSON.parse(lastLog.result) : { empty: true });
+      }
       if (action === 'get_me') {
         const me = await fetch(`https://api.telegram.org/bot${TOKEN}/getMe`).then(r => r.json());
         return res.status(200).json(me);
@@ -3437,7 +3441,9 @@ module.exports = async function handler(req, res) {
     // 1. 🏆 Топ-5 лідерборду (Графічна картка + рейтинг)
     let topText = '';
     try {
-      const lbRaw = await redis('HGETALL', 'leaderboard');
+      const lbPromise = redis('HGETALL', 'leaderboard');
+      const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve(null), 1200));
+      const lbRaw = await Promise.race([lbPromise, timeoutPromise]);
       if (lbRaw?.result && Array.isArray(lbRaw.result)) {
         let players = [];
         for (let i = 0; i < lbRaw.result.length; i += 2) {
@@ -3482,7 +3488,7 @@ module.exports = async function handler(req, res) {
       },
       reply_markup: {
         inline_keyboard: [
-          [{ text: '🫓 Грати у Фокача Клікер', web_app: { url: WEBAPP_URL } }],
+          [{ text: '🫓 Відкрити бота', url: 'https://t.me/focaca_robot' }],
         ],
       },
     };
@@ -3501,12 +3507,12 @@ module.exports = async function handler(req, res) {
           `🔥 <i>«Хто швидше клікає? Доведи свою майстерність або поступися!»</i>\n\n` +
           `🎯 <b>Формат:</b> PvP-битва 1 на 1 у реальному часі\n` +
           `🏆 <b>Ставки:</b> Фокачі 🫓 або Алмази 💎\n\n` +
-          `<i>Натисніть кнопку нижче, щоб прийняти бій:</i>`,
+          `<i>Натисніть кнопку нижче, щоб перейти до бою:</i>`,
         parse_mode: 'HTML',
       },
       reply_markup: {
         inline_keyboard: [
-          [{ text: '⚔️ Прийняти дуель!', web_app: { url: 'https://nout0688-cloud.github.io/focaccia-clicker/?v=1.4.0&duel=lobby' } }],
+          [{ text: '⚔️ Прийняти дуель!', url: 'https://t.me/focaca_robot?start=duel_lobby' }],
         ],
       },
     };
@@ -3531,7 +3537,7 @@ module.exports = async function handler(req, res) {
       },
       reply_markup: {
         inline_keyboard: [
-          [{ text: '🤝 Увійти в трейд', web_app: { url: 'https://nout0688-cloud.github.io/focaccia-clicker/?v=1.4.0&trade=lobby' } }],
+          [{ text: '🤝 Увійти в трейд', url: 'https://t.me/focaca_robot?start=trade_lobby' }],
         ],
       },
     };
@@ -3574,7 +3580,7 @@ module.exports = async function handler(req, res) {
       },
       reply_markup: {
         inline_keyboard: [
-          [{ text: '🫓 Грати у Фокача Клікер', web_app: { url: WEBAPP_URL } }],
+          [{ text: '🫓 Грати у Фокача Клікер', url: 'https://t.me/focaca_robot' }],
         ],
       },
     };
@@ -3630,14 +3636,29 @@ module.exports = async function handler(req, res) {
           results,
           cache_time: 1,
           is_personal: true,
+          button: {
+            text: '🫓 Відкрити Фокача Клікер',
+            web_app: { url: WEBAPP_URL },
+          },
         }),
       });
       const data = await tgRes.json();
+      await redis('SET', 'last_inline_log', JSON.stringify({
+        at: new Date().toISOString(),
+        iqId,
+        from: fromUser.id,
+        q,
+        tgRes: data,
+      }), 'EX', 3600);
       if (!data.ok) {
         console.error('Telegram answerInlineQuery failed:', data);
       }
     } catch (e) {
       console.error('Error answering inline query:', e);
+      await redis('SET', 'last_inline_log', JSON.stringify({
+        at: new Date().toISOString(),
+        error: e.message,
+      }), 'EX', 3600);
     }
 
     return res.status(200).json({ ok: true });
