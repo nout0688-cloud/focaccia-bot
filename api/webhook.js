@@ -3183,45 +3183,134 @@ async function handleAdminAwaitInput(TOKEN, chatId, text, awaitData) {
     return;
   }
 
-  if (action === 'broadcast') {
-    const broadcastText = text.trim();
-    const usersData = await redis('HGETALL', 'users');
-    if (!usersData?.result) {
-      await sendTg(TOKEN, 'sendMessage', {
-        chat_id: chatId,
-        text: '❌ Немає юзерів у базі.',
-        reply_markup: {
-          inline_keyboard: [[{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }]],
-        },
-      });
-      return;
-    }
-    const entries = usersData.result;
-    let sent = 0, failed = 0;
-    for (let i = 0; i < entries.length; i += 2) {
-      const uid = entries[i];
-      try {
-        await sendTg(TOKEN, 'sendMessage', {
-          chat_id: Number(uid),
-          text: `📢 *Оголошення:*\n\n${broadcastText}`,
-          parse_mode: 'Markdown',
-          reply_markup: {
-            inline_keyboard: [[{ text: '🫓 Грати!', web_app: { url: WEBAPP_URL } }]],
-          },
-        });
-        sent++;
-      } catch {
-        failed++;
-      }
-    }
+async function executeBroadcast(TOKEN, chatId, broadcastText) {
+  const textToSend = (broadcastText || '').trim();
+  if (!textToSend) {
     await sendTg(TOKEN, 'sendMessage', {
       chat_id: chatId,
-      text: `✅ Розсилка завершена!\n📨 Відправлено: *${sent}*\n❌ Помилок: *${failed}*`,
-      parse_mode: 'Markdown',
+      text: '❌ Порожній текст розсилки.',
       reply_markup: {
         inline_keyboard: [[{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }]],
       },
     });
+    return;
+  }
+
+  // 1. Отримуємо унікальні ID гравців з баз users та leaderboard
+  const targetIds = new Set();
+  try {
+    const usersData = await redis('HGETALL', 'users');
+    if (usersData?.result && Array.isArray(usersData.result)) {
+      for (let i = 0; i < usersData.result.length; i += 2) {
+        const uid = Number(usersData.result[i]);
+        if (uid && !isNaN(uid) && uid > 0) targetIds.add(uid);
+      }
+    }
+  } catch (e) {
+    console.error('Redis users fetch error in broadcast:', e);
+  }
+
+  try {
+    const lbData = await redis('HGETALL', 'leaderboard');
+    if (lbData?.result && Array.isArray(lbData.result)) {
+      for (let i = 0; i < lbData.result.length; i += 2) {
+        const uid = Number(lbData.result[i]);
+        if (uid && !isNaN(uid) && uid > 0) targetIds.add(uid);
+      }
+    }
+  } catch (e) {
+    console.error('Redis leaderboard fetch error in broadcast:', e);
+  }
+
+  if (targetIds.size === 0) {
+    await sendTg(TOKEN, 'sendMessage', {
+      chat_id: chatId,
+      text: '❌ Немає юзерів у базі для розсилки.',
+      reply_markup: {
+        inline_keyboard: [[{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }]],
+      },
+    });
+    return;
+  }
+
+  // Повідомлення адміну про старт розсилки
+  await sendTg(TOKEN, 'sendMessage', {
+    chat_id: chatId,
+    text: `⏳ *Розпочато розсилку для ${targetIds.size} гравців...*\nБудь ласка, зачекайте.`,
+    parse_mode: 'Markdown',
+  });
+
+  let sent = 0;
+  let failed = 0;
+
+  for (const uid of targetIds) {
+    try {
+      // Спроба 1: відправка з Markdown
+      let res = await sendTg(TOKEN, 'sendMessage', {
+        chat_id: uid,
+        text: `📢 *Оголошення:*\n\n${textToSend}`,
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [[{ text: '🫓 Грати у Фокача Клікер!', web_app: { url: WEBAPP_URL } }]],
+        },
+      });
+
+      // Фоллбек: якщо Markdown містить невалідні символи, відправляємо звичайним текстом
+      if (!res || !res.ok) {
+        res = await sendTg(TOKEN, 'sendMessage', {
+          chat_id: uid,
+          text: `📢 Оголошення:\n\n${textToSend}`,
+          reply_markup: {
+            inline_keyboard: [[{ text: '🫓 Грати у Фокача Клікер!', web_app: { url: WEBAPP_URL } }]],
+          },
+        });
+      }
+
+      // Обробка Telegram 429 Flood Limit (затримка і одна повторна спроба)
+      if (res?.error_code === 429 && res?.parameters?.retry_after) {
+        const waitMs = Math.min(6000, (res.parameters.retry_after + 1) * 1000);
+        await new Promise((r) => setTimeout(r, waitMs));
+        res = await sendTg(TOKEN, 'sendMessage', {
+          chat_id: uid,
+          text: `📢 Оголошення:\n\n${textToSend}`,
+          reply_markup: {
+            inline_keyboard: [[{ text: '🫓 Грати у Фокача Клікер!', web_app: { url: WEBAPP_URL } }]],
+          },
+        });
+      }
+
+      // Тільки якщо Telegram підтвердив успіх:
+      if (res && res.ok) {
+        sent++;
+      } else {
+        failed++;
+      }
+    } catch (err) {
+      console.error(`Broadcast error for ${uid}:`, err);
+      failed++;
+    }
+
+    // Затримка 35мс для уникнення ліміту Telegram 30 msg/sec
+    await new Promise((r) => setTimeout(r, 35));
+  }
+
+  // Фінальний звіт адміну
+  await sendTg(TOKEN, 'sendMessage', {
+    chat_id: chatId,
+    text:
+      `✅ *Розсилку завершено!*\n\n` +
+      `👥 Всього в базі: *${targetIds.size}*\n` +
+      `📨 Успішно доставлено: *${sent}*\n` +
+      `❌ Не доставлено (заблоковано / помилка): *${failed}*`,
+    parse_mode: 'Markdown',
+    reply_markup: {
+      inline_keyboard: [[{ text: '⬅️ Назад до адмінки', callback_data: 'admin:back' }]],
+    },
+  });
+}
+
+  if (action === 'broadcast') {
+    await executeBroadcast(TOKEN, chatId, text);
     return;
   }
 
@@ -5204,13 +5293,13 @@ module.exports = async function handler(req, res) {
     }
 
     const msg = update.message;
-    if (!msg?.text) return res.status(200).json({ ok: true });
+    const text = (msg?.text || msg?.caption || '').trim();
+    if (!text) return res.status(200).json({ ok: true });
 
     const chatId = msg.chat.id;
     const userId = msg.from?.id;
     const name = msg.from?.first_name || 'друже';
     const username = msg.from?.username;
-    const text = msg.text.trim();
 
     // Save user info for reminders + admin
     const userData = JSON.stringify({
@@ -5388,7 +5477,7 @@ module.exports = async function handler(req, res) {
           return res.status(200).json({ ok: true });
         }
 
-        if (text.startsWith('/')) {
+        if (text.startsWith('/') && awaitData.action !== 'broadcast') {
           if (promptId) await deleteTg(TOKEN, chatId, promptId);
         } else {
           if (promptId) await deleteTg(TOKEN, chatId, promptId);
@@ -5838,41 +5927,14 @@ module.exports = async function handler(req, res) {
     }
 
     // /broadcast <text>
-    if (cmd.startsWith('/broadcast ') || cmd.startsWith('broadcast ')) {
-      const broadcastText = text.replace(/^\/?broadcast\s+/i, '').trim();
+    if (cmd.startsWith('/broadcast ') || cmd.startsWith('broadcast ') || cmd.startsWith('/розсилка ') || cmd.startsWith('розсилка ')) {
+      const broadcastText = text.replace(/^\/?(broadcast|розсилка)\s+/i, '').trim();
       if (!broadcastText) {
         await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Вкажи текст: /broadcast <текст>' });
         return res.status(200).json({ ok: true });
       }
 
-      const usersData = await redis('HGETALL', 'users');
-      if (!usersData?.result) {
-        await sendTg(TOKEN, 'sendMessage', { chat_id: chatId, text: '❌ Немає юзерів' });
-        return res.status(200).json({ ok: true });
-      }
-
-      const entries = usersData.result;
-      let sent = 0, failed = 0;
-
-      for (let i = 0; i < entries.length; i += 2) {
-        const uid = entries[i];
-        try {
-          await sendTg(TOKEN, 'sendMessage', {
-            chat_id: Number(uid),
-            text: `📢 *Оголошення:*\n\n${broadcastText}`,
-            parse_mode: 'Markdown',
-            reply_markup: {
-              inline_keyboard: [[{ text: '🫓 Грати!', web_app: { url: WEBAPP_URL } }]],
-            },
-          });
-          sent++;
-        } catch { failed++; }
-      }
-
-      await sendTg(TOKEN, 'sendMessage', {
-        chat_id: chatId,
-        text: `✅ Розсилка завершена!\n📨 Відправлено: ${sent}\n❌ Помилок: ${failed}`,
-      });
+      await executeBroadcast(TOKEN, chatId, broadcastText);
       return res.status(200).json({ ok: true });
     }
 
