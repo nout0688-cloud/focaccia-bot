@@ -3666,6 +3666,7 @@ module.exports = async function handler(req, res) {
         title = '⚡ Стартовий набір';
         extraNote = '\n🪵 Вам також надано зброю проти босів «Бойова скалка»!';
         await redis('HSET', `user_extra:${targetUserId}`, 'vip_upgrade', 'vip_hammer');
+        await redis('SET', `starter_bought:${targetUserId}`, '1');
       } else if (packageId === 'tip_dev') {
         diamonds = 25;
         title = '☕ Чайові розробнику';
@@ -4421,6 +4422,7 @@ module.exports = async function handler(req, res) {
           // Starter pack weapon
           if (order.isStarter) {
             await redis('HSET', `user_extra:${order.userId}`, 'vip_upgrade', 'vip_hammer');
+            await redis('SET', `starter_bought:${order.userId}`, '1');
           }
 
           // Patron badge

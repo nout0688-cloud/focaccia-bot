@@ -107,6 +107,16 @@ module.exports = async function handler(req, res) {
     });
   }
 
+  // GET: Перевірка, чи вже куплено стартовий набір
+  if (req.query.action === 'check_starter') {
+    const userId = String(req.query.userId || '').trim();
+    if (!userId) {
+      return res.status(400).json({ ok: false, error: 'userId is required' });
+    }
+    const bought = await redis('GET', `starter_bought:${userId}`);
+    return res.status(200).json({ ok: true, bought: !!bought?.result });
+  }
+
   // GET: return config, jarUrl and packages
   if (req.method === 'GET' && !req.query.packageId) {
     return res.status(200).json({
@@ -232,6 +242,17 @@ module.exports = async function handler(req, res) {
         isStarter: !!pkg.isStarter,
         isTip: !!pkg.isTip,
       });
+    }
+
+    // Перевірка: чи не намагається гравець повторно купити стартовий набір
+    if (isStarter && userId) {
+      const bought = await redis('GET', `starter_bought:${userId}`);
+      if (bought?.result) {
+        return res.status(400).json({
+          ok: false,
+          error: 'Стартовий набір можна придбати лише один раз!',
+        });
+      }
     }
 
     // Генерація 4-значного коду (напр. FC-4821)

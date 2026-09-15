@@ -722,6 +722,9 @@ async function resolveUserId(input) {
     const extraUpgrade = extraUpgradeData?.result || null;
     if (extraUpgrade) await redis('HDEL', `user_extra:${userId}`, 'vip_upgrade');
 
+    const starterBoughtRaw = await redis('GET', `starter_bought:${userId}`);
+    const starterBought = starterBoughtRaw?.result === '1' || extraUpgrade === 'vip_hammer';
+
     const patronData = await redis('HGET', `user_extra:${userId}`, 'badge_patron');
     const patronBadge = patronData?.result === '1';
     if (patronBadge) await redis('HDEL', `user_extra:${userId}`, 'badge_patron');
@@ -771,10 +774,11 @@ async function resolveUserId(input) {
         restore: pendingRestore,
         roflSound: roflSound || undefined,
         maintenance: isMaintenance,
+        starterBought,
       });
     }
 
-    return res.status(200).json({ ok: true, reward: 0, trades: [], karma, resetSkins, skinsResetTime, restore: pendingRestore, roflSound: roflSound || undefined, maintenance: isMaintenance });
+    return res.status(200).json({ ok: true, reward: 0, trades: [], karma, resetSkins, skinsResetTime, restore: pendingRestore, roflSound: roflSound || undefined, maintenance: isMaintenance, starterBought });
   } catch (err) {
     console.error('Reward error:', err);
     return res.status(200).json({ ok: true, reward: 0, maintenance: isMaintenance });
